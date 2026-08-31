@@ -185,6 +185,37 @@ export const slackActions: ActionDefinition[] = [
     ),
   }),
   action({
+    name: "conversations_members",
+    description:
+      "List the member user IDs of a Slack conversation. Returns one page; pass the cursor from nextCursor until it comes back empty.",
+    requiredScopes: ["channels:read", "groups:read", "im:read", "mpim:read"],
+    inputSchema: s.object(
+      {
+        channelId: channelIdSchema,
+        cursor: s.string({
+          description: "The Slack pagination cursor from a previous page. Omit for the first page.",
+        }),
+        limit: s.integer({
+          minimum: 1,
+          maximum: 1000,
+          description: "The maximum number of members to return per page.",
+        }),
+      },
+      { required: ["channelId"], description: "Input parameters for listing Slack conversation members." },
+    ),
+    outputSchema: s.object(
+      {
+        memberIds: s.array(userIdSchema, {
+          description: "The Slack user IDs that are members of the conversation.",
+        }),
+        nextCursor: s.string({
+          description: "The cursor for the next page, or an empty string when this is the last page.",
+        }),
+      },
+      { required: ["memberIds", "nextCursor"], description: "The output payload for this action." },
+    ),
+  }),
+  action({
     name: "search_messages",
     operationType: "read",
     description:

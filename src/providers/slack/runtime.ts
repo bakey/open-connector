@@ -11,7 +11,6 @@ import {
   isAbortLikeError,
   ProviderRequestError,
   providerUserAgent,
-  requireOAuthCredential,
 } from "../provider-runtime.ts";
 import { slackConversationTypes } from "./constants.ts";
 
@@ -47,15 +46,27 @@ export function defineSlackProviderExecutors(
     service,
     handlers,
     async createContext(context, fetcher): Promise<SlackActionContext> {
-      const credential = await requireOAuthCredential(context, service);
-      if (readSlackTokenKind(credential.accessToken, credential.metadata) != tokenKind) {
-        throw new ProviderRequestError(
-          401,
-          `Reconnect ${service} with ${tokenKind} authorization before running its actions.`,
-        );
+      const credential = await context.getCredential(service);
+      let accessToken: string;
+      if (credential?.authType === "oauth2") {
+        if (readSlackTokenKind(credential.accessToken, credential.metadata) != tokenKind) {
+          throw new ProviderRequestError(
+            401,
+            `Reconnect ${service} with ${tokenKind} authorization before running its actions.`,
+          );
+        }
+        accessToken = credential.accessToken;
+      } else if (credential?.authType === "api_key") {
+        // A pasted token was authorized by no OAuth flow, so the user/bot flow
+        // gate above has nothing to check for it; Slack enforces its own
+        // per-method token rules. Mirrors github and notion, whose api_key arm
+        // is likewise "use this bearer as-is".
+        accessToken = credential.apiKey;
+      } else {
+        throw new ProviderRequestError(401, `Configure ${service} credentials first.`);
       }
       const providerContext: SlackActionContext = {
-        accessToken: credential.accessToken,
+        accessToken,
         fetcher,
         signal: context.signal,
       };
@@ -73,6 +84,9 @@ export const slackActionHandlers: ProviderActionHandlers<"slack", SlackActionHan
   },
   get_channel_messages(input, context) {
     return slackGetChannelMessages(input, context);
+  },
+  conversations_members(input, context) {
+    return slackConversationsMembers(input, context);
   },
   search_messages(input, context) {
     return slackSearchMessages(input, context);
@@ -143,6 +157,30 @@ export const slackActionHandlers: ProviderActionHandlers<"slack", SlackActionHan
 };
 
 export const slackCredentialValidators: CredentialValidators = {
+  async apiKey(input, { fetcher, signal }) {
+    const payload = await slackRequestJson<{
+      ok: boolean;
+      team?: string;
+      team_id?: string;
+      user_id?: string;
+      error?: string;
+    }>({
+      accessToken: input.apiKey,
+      fetcher,
+      signal,
+      method: "auth.test",
+    });
+
+    return {
+      profile: {
+        accountId: payload.user_id ?? payload.team_id ?? "slack:api_key",
+        displayName: payload.team ?? payload.team_id ?? payload.user_id ?? "Slack Workspace",
+      },
+      metadata: {
+        currentAccount: payload,
+      },
+    };
+  },
   async oauth2(input, { fetcher, signal }) {
     const payload = await slackRequestJson<{
       ok: boolean;
@@ -213,6 +251,32 @@ async function slackGetChannelMessages(input: Record<string, unknown>, context: 
       text: message.text ?? "",
     })),
     hasMore: payload.has_more ?? false,
+  };
+}
+
+async function slackConversationsMembers(
+  input: Record<string, unknown>,
+  context: SlackActionContext,
+): Promise<unknown> {
+  const url = slackApiUrl("conversations.members");
+  url.searchParams.set("channel", String(input.channelId));
+  if (input.cursor != null) {
+    url.searchParams.set("cursor", String(input.cursor));
+  }
+  if (input.limit != null) {
+    url.searchParams.set("limit", String(input.limit));
+  }
+
+  const payload = await slackGetJson<{
+    ok: boolean;
+    members?: string[];
+    response_metadata?: { next_cursor?: string };
+    error?: string;
+  }>(url, context);
+
+  return {
+    memberIds: payload.members ?? [],
+    nextCursor: payload.response_metadata?.next_cursor ?? "",
   };
 }
 
