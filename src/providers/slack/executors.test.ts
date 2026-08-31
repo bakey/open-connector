@@ -264,3 +264,54 @@ function apiKeyCredential(apiKey: string): Extract<ResolvedCredential, { authTyp
     metadata: {},
   };
 }
+
+describe("get_channel_messages pagination", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("passes the cursor through and surfaces nextCursor", async () => {
+    const execute = slackExecutors["slack.get_channel_messages"]!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const target = new URL(input.toString());
+        expect(target.searchParams.get("cursor")).toBe("bmV4dF90czox");
+        return Response.json({
+          ok: true,
+          messages: [{ ts: "1711.0001", user: "U023BECGF", text: "hi" }],
+          has_more: true,
+          response_metadata: { next_cursor: "bmV4dF90czoy" },
+        });
+      }),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    await expect(execute({ channelId: "C024BE91L", cursor: "bmV4dF90czox" }, context)).resolves.toMatchObject({
+      ok: true,
+      output: {
+        messages: [{ ts: "1711.0001", userId: "U023BECGF", text: "hi" }],
+        hasMore: true,
+        nextCursor: "bmV4dF90czoy",
+      },
+    });
+  });
+
+  it("answers an empty nextCursor on the last page", async () => {
+    const execute = slackExecutors["slack.get_channel_messages"]!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: true, messages: [], has_more: false })),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    await expect(execute({ channelId: "C024BE91L" }, context)).resolves.toMatchObject({
+      ok: true,
+      output: { messages: [], hasMore: false, nextCursor: "" },
+    });
+  });
+});

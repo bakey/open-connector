@@ -173,6 +173,9 @@ export const slackActions: ActionDefinition[] = [
       {
         channelId: channelIdSchema,
         limit: s.integer({ minimum: 1, maximum: 100, description: "The maximum number of messages to return." }),
+        cursor: s.string({
+          description: "The Slack pagination cursor from a previous page. Omit for the first page.",
+        }),
       },
       { required: ["channelId"], description: "Input parameters for reading Slack conversation history." },
     ),
@@ -180,8 +183,11 @@ export const slackActions: ActionDefinition[] = [
       {
         messages: s.array(slackMessageSchema, { description: "The list of messages in the conversation." }),
         hasMore: s.boolean({ description: "Whether more messages are available beyond this page." }),
+        nextCursor: s.string({
+          description: "The cursor for the next page, or an empty string when this is the last page.",
+        }),
       },
-      { required: ["messages", "hasMore"], description: "The output payload for this action." },
+      { required: ["messages", "hasMore", "nextCursor"], description: "The output payload for this action." },
     ),
   }),
   action({
