@@ -480,14 +480,29 @@ async function slackListConversations(input: Record<string, unknown>, context: S
 
   const payload = await slackGetJson<{
     ok: boolean;
-    channels?: Array<Record<string, unknown>>;
-    response_metadata?: { next_cursor?: string };
+    channels?: unknown;
+    response_metadata?: Record<string, unknown>;
     error?: string;
   }>(url, context);
 
+  // Discovery may prune against this page. Never manufacture an empty list or
+  // terminal cursor from an unreadable enumeration response.
+  if (!Array.isArray(payload.channels)) {
+    throw slackResponseError("conversations.list channels");
+  }
+  const metadata = optionalRecord(payload.response_metadata);
+  if (payload.response_metadata !== undefined && !metadata) {
+    throw slackResponseError("conversations.list response_metadata");
+  }
+  const cursor = metadata?.next_cursor;
+  // Slack documents absent, null and empty cursors as terminal. A present
+  // non-string or padded cursor is malformed, not evidence the walk finished.
+  if (cursor != null && (typeof cursor !== "string" || cursor.trim() !== cursor)) {
+    throw slackResponseError("conversations.list next_cursor");
+  }
   return {
-    conversations: (payload.channels ?? []).map((channel) => normalizeConversation(channel)),
-    nextCursor: normalizeNextCursor(payload.response_metadata?.next_cursor),
+    conversations: payload.channels.map((channel) => normalizeListedConversation(channel)),
+    nextCursor: typeof cursor === "string" ? normalizeNextCursor(cursor) : null,
   };
 }
 
@@ -866,11 +881,16 @@ async function slackFormRequestJson<T extends SlackPayloadError>(
 }
 
 async function readSlackResponseJson<T extends SlackPayloadError>(response: Response): Promise<T> {
-  const payload = (await response.json().catch(() => ({}))) as T;
+  const payload = (optionalRecord(await response.json().catch(() => undefined)) ?? {}) as T;
   if (!response.ok) {
     throw slackHttpError(response.status, payload, response.headers.get("retry-after"));
   }
   assertSlackPayload(payload);
+  // Preserve HTTP/Slack failures (including Retry-After) above, but require
+  // affirmative success before any action can normalize an upstream payload.
+  if (payload.ok !== true) {
+    throw slackResponseError("ok");
+  }
   return payload;
 }
 
@@ -1015,6 +1035,42 @@ function normalizeScheduledPostAt(value: number | string | undefined, fallback: 
     throw new ProviderRequestError(502, "slack schedule_message response is invalid: post_at");
   }
   return postAt;
+}
+
+function normalizeListedConversation(value: unknown): Record<string, unknown> {
+  const channel = optionalRecord(value);
+  if (!channel || typeof channel.id !== "string" || !channel.id || channel.id.trim() !== channel.id) {
+    throw slackResponseError("conversations.list channel id");
+  }
+  for (const field of ["is_im", "is_mpim", "is_private", "is_channel", "is_group"]) {
+    if (channel[field] !== undefined && typeof channel[field] !== "boolean") {
+      throw slackResponseError(`conversations.list ${field}`);
+    }
+  }
+  // Positive IM/MPIM/channel flags establish kind even when unrelated negative
+  // flags are absent. Privacy is required only to distinguish modern channels.
+  if (channel.is_im === true || channel.is_mpim === true) {
+    if (
+      (channel.is_im === true && (channel.is_mpim === true || channel.is_group === true)) ||
+      channel.is_channel === true ||
+      channel.is_private === false
+    ) {
+      throw slackResponseError("conversations.list conflicting direct message classification");
+    }
+  } else if (channel.is_channel === true) {
+    if (typeof channel.is_private !== "boolean" || channel.is_group === true) {
+      throw slackResponseError("conversations.list channel classification");
+    }
+  } else if (channel.is_group === true) {
+    // Legacy groups and MPIMs can both set is_group. Only is_mpim:false makes
+    // this unambiguously a private channel; no negative is_im flag is needed.
+    if (channel.is_mpim !== false || channel.is_private === false) {
+      throw slackResponseError("conversations.list ambiguous group classification");
+    }
+  } else {
+    throw slackResponseError("conversations.list channel classification");
+  }
+  return normalizeConversation(channel);
 }
 
 function normalizeConversationType(conversation: Record<string, unknown>): SlackNormalizedConversationType {

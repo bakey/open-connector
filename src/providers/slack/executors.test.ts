@@ -420,7 +420,208 @@ describe("Slack current credential identity", () => {
   });
 });
 
+describe("Slack discovery page validation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const publicChannel = {
+    id: "C111",
+    is_channel: true,
+    is_group: false,
+    is_im: false,
+    is_mpim: false,
+    is_private: false,
+  };
+  const privateChannel = { ...publicChannel, id: "C222", is_private: true };
+  const context: ExecutionContext = { getCredential: async () => oauthCredential("user") };
+  const execute = slackExecutors["slack.list_conversations"]!;
+
+  async function expectInvalidPage(body: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 200 })),
+    );
+    const result = await execute({ cursor: "page-two" }, context);
+    expect(result).toMatchObject({ ok: false, error: { code: "provider_error", details: { status: 502 } } });
+    expect(result).not.toHaveProperty("output");
+  }
+
+  it.each(["", "<html>upstream unavailable</html>", '{"ok":true,"channels":['])(
+    "rejects invalid JSON instead of completing a later page: %j",
+    expectInvalidPage,
+  );
+
+  it.each(
+    [
+      null,
+      [],
+      1,
+      "unexpected",
+      {},
+      { channels: [] },
+      ...[null, 0, 1, "true", [], {}].map((ok) => ({ ok, channels: [] })),
+    ].map((payload) => ({ payload })),
+  )("requires an explicit successful Slack envelope: $payload", async ({ payload }) => {
+    await expectInvalidPage(JSON.stringify(payload));
+  });
+
+  it.each([{}, ...[null, {}, "channels", 0, false].map((channels) => ({ channels }))])(
+    "requires a channels array: %j",
+    async (fields) => {
+      await expectInvalidPage(JSON.stringify({ ok: true, ...fields }));
+    },
+  );
+
+  it.each([null, [], "metadata", 0, false].map((metadata) => ({ metadata })))(
+    "rejects malformed present response_metadata: $metadata",
+    async ({ metadata }) => {
+      await expectInvalidPage(JSON.stringify({ ok: true, channels: [publicChannel], response_metadata: metadata }));
+    },
+  );
+
+  it.each([0, 42, false, [], {}, " ", " next-page", "next-page "].map((cursor) => ({ cursor })))(
+    "rejects malformed present next_cursor: $cursor",
+    async ({ cursor }) => {
+      await expectInvalidPage(
+        JSON.stringify({ ok: true, channels: [publicChannel], response_metadata: { next_cursor: cursor } }),
+      );
+    },
+  );
+
+  it.each([
+    {},
+    { response_metadata: {} },
+    { response_metadata: { next_cursor: "" } },
+    { response_metadata: { next_cursor: null } },
+  ])("accepts documented terminal cursor omissions: %j", async (fields) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: true, channels: [], ...fields })),
+    );
+    await expect(execute({}, context)).resolves.toMatchObject({
+      ok: true,
+      output: { conversations: [], nextCursor: null },
+    });
+  });
+
+  it("preserves the cursor on an empty intermediate page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          ok: true,
+          channels: [],
+          response_metadata: { next_cursor: "next-page=" },
+        }),
+      ),
+    );
+    await expect(execute({}, context)).resolves.toMatchObject({
+      ok: true,
+      output: { conversations: [], nextCursor: "next-page=" },
+    });
+  });
+
+  it.each(
+    [
+      null,
+      [],
+      "channel",
+      7,
+      ...[undefined, null, 123, "", " ", " C222"].map((id) => ({ ...privateChannel, id })),
+      ...["is_channel", "is_group", "is_im", "is_mpim", "is_private"].map((field) => ({
+        ...privateChannel,
+        [field]: "true",
+      })),
+      { ...privateChannel, is_private: undefined },
+      { id: "C222", is_im: false, is_mpim: false, is_private: true },
+      { id: "C222", is_channel: true },
+      { id: "G222", is_group: true },
+      { id: "G222", is_group: true, is_private: true },
+      { ...privateChannel, is_group: true },
+      { id: "D333", is_im: true, is_mpim: true },
+      { id: "D333", is_im: true, is_private: false },
+      { ...privateChannel, is_im: true },
+      { ...privateChannel, is_mpim: true },
+      { ...privateChannel, is_channel: false, is_group: true, is_private: false },
+    ].map((channel) => ({ channel })),
+  )("rejects an invalid row without publishing the preceding valid row: $channel", async ({ channel }) => {
+    await expectInvalidPage(JSON.stringify({ ok: true, channels: [publicChannel, channel] }));
+  });
+
+  it("preserves modern and legacy channels, minimal IMs, and group DMs without requiring display fields", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          ok: true,
+          channels: [
+            publicChannel,
+            privateChannel,
+            { ...privateChannel, id: "G222", is_channel: false, is_group: true, is_archived: true },
+            { id: "D333", is_im: true },
+            { id: "G444", is_channel: false, is_group: true, is_im: false, is_mpim: true, is_private: true },
+          ],
+        }),
+      ),
+    );
+    const result = await execute({}, context);
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        nextCursor: null,
+        conversations: [
+          { channelId: "C111", type: "public_channel" },
+          { channelId: "C222", type: "private_channel" },
+          { channelId: "G222", type: "private_channel", isArchived: true },
+          { channelId: "D333", type: "im" },
+          { channelId: "G444", type: "mpim" },
+        ],
+      },
+    });
+  });
+
+  // Positive discriminators identify the kind; omitted negative flags are not
+  // evidence of a malformed row. The legacy MPIM example omits is_im entirely:
+  // https://docs.slack.dev/reference/objects/mpim-object/
+  // Modern channel privacy is explicit in the conversation boolean contract:
+  // https://docs.slack.dev/reference/objects/conversation-object/#conversation-related-booleans
+  // Legacy groups need is_mpim:false because MPIMs can also appear as groups:
+  // https://docs.slack.dev/reference/objects/group-object/
+  it.each([
+    { row: { id: "D333", is_im: true }, kind: "im" },
+    { row: { id: "G444", is_mpim: true }, kind: "mpim" },
+    { row: { id: "G444", is_mpim: true, is_group: false }, kind: "mpim" },
+    { row: { id: "G444", is_mpim: true, is_group: true }, kind: "mpim" },
+    { row: { id: "C111", is_channel: true, is_private: false }, kind: "public_channel" },
+    { row: { id: "C222", is_channel: true, is_private: true }, kind: "private_channel" },
+    { row: { id: "G222", is_group: true, is_mpim: false }, kind: "private_channel" },
+    { row: { id: "G222", is_group: true, is_mpim: false, is_private: true }, kind: "private_channel" },
+    { row: { ...privateChannel, is_im: undefined }, kind: "private_channel" },
+    { row: { ...privateChannel, is_mpim: undefined }, kind: "private_channel" },
+  ])("accepts an unambiguous minimal $kind row: $row", async ({ row, kind }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: true, channels: [row] })),
+    );
+    await expect(execute({}, context)).resolves.toMatchObject({
+      ok: true,
+      output: { conversations: [{ channelId: row.id, type: kind }], nextCursor: null },
+    });
+  });
+
+  it.each([
+    { error: "invalid_auth", code: "authorization_failed" },
+    { error: "ratelimited", code: "rate_limited" },
+  ])("preserves Slack's explicit $error failure", async ({ error, code }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: false, error })),
+    );
+    await expect(execute({}, context)).resolves.toMatchObject({ ok: false, error: { code } });
+  });
+});
+
 describe("Slack discovery rate limit details", () => {
+  afterEach(() => vi.unstubAllGlobals());
   it("preserves Retry-After through the action error envelope", async () => {
     vi.stubGlobal(
       "fetch",
@@ -434,6 +635,24 @@ describe("Slack discovery rate limit details", () => {
       { getCredential: async () => oauthCredential("user") },
     );
     expect(result).toMatchObject({
+      ok: false,
+      error: { code: "rate_limited", details: { status: 429, details: { retryAfterSeconds: 73 } } },
+    });
+  });
+
+  it.each(["", "not JSON", "null"])("preserves Retry-After when the HTTP 429 body is unreadable: %j", async (body) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 429, headers: { "Retry-After": "73" } })),
+    );
+    await expect(
+      slackExecutors["slack.list_conversations"]!(
+        {},
+        {
+          getCredential: async () => oauthCredential("user"),
+        },
+      ),
+    ).resolves.toMatchObject({
       ok: false,
       error: { code: "rate_limited", details: { status: 429, details: { retryAfterSeconds: 73 } } },
     });
