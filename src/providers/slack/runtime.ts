@@ -79,6 +79,9 @@ export function defineSlackProviderExecutors(
 }
 
 export const slackActionHandlers: ProviderActionHandlers<"slack", SlackActionHandler> = {
+  get_current_user(_input, context) {
+    return slackGetCurrentUser(context);
+  },
   list_channels(input, context) {
     return slackListChannels(input, context);
   },
@@ -209,6 +212,32 @@ export const slackCredentialValidators: CredentialValidators = {
     };
   },
 };
+
+async function slackGetCurrentUser(context: SlackActionContext): Promise<unknown> {
+  const payload = await slackRequestJson<
+    SlackPayloadError & {
+      team_id?: unknown;
+      user_id?: unknown;
+      bot_id?: unknown;
+    }
+  >({ ...context, method: "auth.test" });
+
+  if (payload.ok !== true) {
+    throw slackResponseError("auth.test ok");
+  }
+  // Identity is upstream data, not a token-prefix or cached profile inference.
+  // Refuse whitespace normalization so malformed identity never becomes a key.
+  for (const field of ["team_id", "user_id", "bot_id"] as const) {
+    const value = payload[field];
+    if (field === "bot_id" && value === undefined) {
+      continue;
+    }
+    if (typeof value !== "string" || !value || value.trim() !== value) {
+      throw slackResponseError(`auth.test ${field}`);
+    }
+  }
+  return { teamId: payload.team_id, userId: payload.user_id, isBot: payload.bot_id !== undefined };
+}
 
 async function slackListChannels(input: Record<string, unknown>, context: SlackActionContext): Promise<unknown> {
   const url = slackApiUrl("conversations.list");

@@ -1,7 +1,11 @@
 import type { ExecutionContext, ResolvedCredential } from "../../core/types.ts";
 
+import { Validator } from "@cfworker/json-schema";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { validateActionInput } from "../../core/validation.ts";
+import { slackbotActions } from "../slackbot/actions.ts";
 import { executors as slackbotExecutors } from "../slackbot/executors.ts";
+import { slackActions } from "./actions.ts";
 import { credentialValidators, executors as slackExecutors } from "./executors.ts";
 
 type OAuthCredential = Extract<ResolvedCredential, { authType: "oauth2" }>;
@@ -190,14 +194,15 @@ describe("Slack ACL enumeration and api_key authorization", () => {
       getCredential: async () => apiKeyCredential("xoxb-bot-token"),
     };
 
-    await expect(execute({ channelId: "C024BE91L", cursor: "dXNlcjpVMDYxTkZUVDI=", limit: 200 }, context)).resolves
-      .toMatchObject({
-        ok: true,
-        output: {
-          memberIds: ["U023BECGF", "U061F7AUR", "W012A3CDE"],
-          nextCursor: "e3VzZXJfaWQ6IFcxMjM0NTY3fQ==",
-        },
-      });
+    await expect(
+      execute({ channelId: "C024BE91L", cursor: "dXNlcjpVMDYxTkZUVDI=", limit: 200 }, context),
+    ).resolves.toMatchObject({
+      ok: true,
+      output: {
+        memberIds: ["U023BECGF", "U061F7AUR", "W012A3CDE"],
+        nextCursor: "e3VzZXJfaWQ6IFcxMjM0NTY3fQ==",
+      },
+    });
   });
 
   it("returns an empty nextCursor when Slack sends none, so callers can terminate", async () => {
@@ -312,6 +317,105 @@ describe("get_channel_messages pagination", () => {
     await expect(execute({ channelId: "C024BE91L" }, context)).resolves.toMatchObject({
       ok: true,
       output: { messages: [], hasMore: false, nextCursor: "" },
+    });
+  });
+});
+
+describe("Slack current credential identity", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("exposes a scope-free, empty-input identity contract only on Slack", () => {
+    const action = slackActions.find((action) => action.id === "slack.get_current_user");
+    expect(action).toBeDefined();
+    expect(action!.requiredScopes).toEqual([]);
+    expect(validateActionInput(action!, {}).valid).toBe(true);
+    expect(validateActionInput(action!, { teamId: "TOTHER" }).valid).toBe(false);
+    const output = new Validator(action!.outputSchema);
+    expect(output.validate({ teamId: "T123", userId: "U123", isBot: false }).valid).toBe(true);
+    for (const invalid of [
+      { userId: "U123", isBot: false },
+      { teamId: "T123", isBot: false },
+      { teamId: "T123", userId: "U123" },
+      { teamId: "", userId: "U123", isBot: false },
+      { teamId: "T123", userId: "", isBot: false },
+    ]) {
+      expect(output.validate(invalid).valid).toBe(false);
+    }
+    expect(slackbotActions.some((action) => action.name === "get_current_user")).toBe(false);
+    expect(slackbotExecutors["slackbot.get_current_user"]).toBeUndefined();
+  });
+
+  it.each([
+    { credential: oauthCredential("user", {}, "opaque-user-token"), botId: undefined, isBot: false },
+    { credential: oauthCredential("user", {}, "xoxp-user-token"), botId: "B123", isBot: true },
+    { credential: apiKeyCredential("xoxb-misleading-prefix"), botId: undefined, isBot: false },
+    { credential: apiKeyCredential("opaque-bot-token"), botId: "B123", isBot: true },
+  ])("uses auth.test identity and bot_id for $credential.authType ($isBot)", async ({ credential, botId, isBot }) => {
+    const execute = slackExecutors["slack.get_current_user"];
+    expect(execute).toBeDefined();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(url)).toBe("https://slack.com/api/auth.test");
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBeUndefined();
+        const token = credential.authType === "oauth2" ? credential.accessToken : credential.apiKey;
+        expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
+        return Response.json({ ok: true, team_id: "T024BE7LD", user_id: "U024BE7LH", bot_id: botId });
+      }),
+    );
+    await expect(
+      execute!(
+        {},
+        {
+          getCredential: async (service) => {
+            expect(service).toBe("slack");
+            return credential;
+          },
+        },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      output: { teamId: "T024BE7LD", userId: "U024BE7LH", isBot },
+    });
+  });
+
+  it.each([
+    {},
+    { team_id: "T123", user_id: "U123" },
+    { ok: "true", team_id: "T123", user_id: "U123" },
+    { ok: true, user_id: "U123" },
+    { ok: true, team_id: "T123" },
+    { ok: true, team_id: "", user_id: "U123" },
+    { ok: true, team_id: "T123", user_id: " " },
+    { ok: true, team_id: 123, user_id: "U123" },
+    { ok: true, team_id: "T123", user_id: null },
+    { ok: true, team_id: " T123", user_id: "U123" },
+    { ok: true, team_id: "T123", user_id: "U123", bot_id: "" },
+    { ok: true, team_id: "T123", user_id: "U123", bot_id: false },
+    { ok: true, team_id: "T123", user_id: "U123", bot_id: null },
+  ])("rejects malformed auth.test identity %j", async (payload) => {
+    const execute = slackExecutors["slack.get_current_user"];
+    expect(execute).toBeDefined();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(payload)),
+    );
+    const result = await execute!({}, { getCredential: async () => oauthCredential("user") });
+    expect(result).toMatchObject({ ok: false, error: { code: "provider_error", details: { status: 502 } } });
+    expect(result).not.toHaveProperty("output");
+  });
+
+  it("propagates a rejected credential instead of returning an identity", async () => {
+    const execute = slackExecutors["slack.get_current_user"];
+    expect(execute).toBeDefined();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ ok: false, error: "invalid_auth" })),
+    );
+    await expect(execute!({}, { getCredential: async () => oauthCredential("user") })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "authorization_failed" },
     });
   });
 });

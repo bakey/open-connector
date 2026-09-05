@@ -149,6 +149,21 @@ const reactionItemSchema = s.unknownObject("A Slack item with reactions.");
 
 export const slackActions: ActionDefinition[] = [
   action({
+    name: "get_current_user",
+    description:
+      "Get the workspace and user identity of the connected Slack credential, including whether it belongs to a bot.",
+    requiredScopes: [],
+    inputSchema: s.object({}),
+    outputSchema: s.object(
+      {
+        teamId: nonEmptyString("The Slack workspace ID."),
+        userId: userIdSchema,
+        isBot: s.boolean({ description: "Whether auth.test identifies this credential with a bot_id." }),
+      },
+      { required: ["teamId", "userId", "isBot"] },
+    ),
+  }),
+  action({
     name: "list_channels",
     operationType: "read",
     description: "List Slack public channels visible to the connected Slack identity.",
