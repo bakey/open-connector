@@ -868,7 +868,7 @@ async function slackFormRequestJson<T extends SlackPayloadError>(
 async function readSlackResponseJson<T extends SlackPayloadError>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => ({}))) as T;
   if (!response.ok) {
-    throw slackHttpError(response.status, payload);
+    throw slackHttpError(response.status, payload, response.headers.get("retry-after"));
   }
   assertSlackPayload(payload);
   return payload;
@@ -1142,8 +1142,16 @@ function formatSlackPayloadError(payload: SlackPayloadError): string {
   return `${error}: ${details.join("; ")}`;
 }
 
-function slackHttpError(status: number, payload: SlackPayloadError): ProviderRequestError {
+function slackHttpError(status: number, payload: SlackPayloadError, retryAfter: string | null): ProviderRequestError {
   const message = payload.error ? formatSlackPayloadError(payload) : `slack request failed with ${status}`;
+  if (status === 429 && retryAfter !== null && /^\d+$/.test(retryAfter)) {
+    const retryAfterSeconds = Number(retryAfter);
+    if (Number.isSafeInteger(retryAfterSeconds)) {
+      // The action envelope carries provider details; retain pacing so callers
+      // can resume the same page without guessing when this workspace may retry.
+      return new ProviderRequestError(status, message, { ...payload, retryAfterSeconds });
+    }
+  }
   return new ProviderRequestError(status, message, payload);
 }
 

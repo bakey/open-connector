@@ -419,3 +419,23 @@ describe("Slack current credential identity", () => {
     });
   });
 });
+
+describe("Slack discovery rate limit details", () => {
+  it("preserves Retry-After through the action error envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ ok: false, error: "ratelimited" }, { status: 429, headers: { "Retry-After": "73" } }),
+      ),
+    );
+    const execute = slackExecutors["slack.list_conversations"]!;
+    const result = await execute(
+      { types: ["public_channel"], cursor: "page-two" },
+      { getCredential: async () => oauthCredential("user") },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "rate_limited", details: { status: 429, details: { retryAfterSeconds: 73 } } },
+    });
+  });
+});
