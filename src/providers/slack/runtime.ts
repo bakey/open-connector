@@ -3,7 +3,14 @@ import type { ProviderActionHandlers } from "../provider-runtime.ts";
 import type { OAuthProviderContext } from "../provider-runtime.ts";
 import type { SlackNormalizedConversationType } from "./constants.ts";
 
-import { compactObject, optionalBoolean, optionalRecord, optionalString, requiredString } from "../../core/cast.ts";
+import {
+  compactObject,
+  optionalBoolean,
+  optionalInteger,
+  optionalRecord,
+  optionalString,
+  requiredString,
+} from "../../core/cast.ts";
 import { assertPublicHttpUrl, readBoundedResponseBytes } from "../../core/request.ts";
 import {
   createProviderTimeout,
@@ -268,21 +275,18 @@ async function slackGetChannelMessages(input: Record<string, unknown>, context: 
   if (input.cursor != null) {
     url.searchParams.set("cursor", String(input.cursor));
   }
+  applySlackHistoryWindow(url, input);
 
   const payload = await slackGetJson<{
     ok: boolean;
-    messages?: Array<{ ts: string; user?: string; text?: string }>;
+    messages?: Array<Record<string, unknown>>;
     has_more?: boolean;
     response_metadata?: { next_cursor?: string };
     error?: string;
   }>(url, context);
 
   return {
-    messages: (payload.messages ?? []).map((message) => ({
-      ts: message.ts,
-      userId: message.user ?? "",
-      text: message.text ?? "",
-    })),
+    messages: (payload.messages ?? []).map((message) => normalizeSlackMessage(message)),
     hasMore: payload.has_more ?? false,
     nextCursor: payload.response_metadata?.next_cursor ?? "",
   };
@@ -446,21 +450,26 @@ async function slackGetThread(input: Record<string, unknown>, context: SlackActi
   const url = slackApiUrl("conversations.replies");
   url.searchParams.set("channel", String(input.channelId));
   url.searchParams.set("ts", String(input.threadTs));
+  if (input.limit != null) {
+    url.searchParams.set("limit", String(input.limit));
+  }
+  if (input.cursor != null) {
+    url.searchParams.set("cursor", String(input.cursor));
+  }
+  applySlackHistoryWindow(url, input);
 
   const payload = await slackGetJson<{
     ok: boolean;
-    messages?: Array<{ ts: string; user?: string; text?: string }>;
+    messages?: Array<Record<string, unknown>>;
     has_more?: boolean;
+    response_metadata?: { next_cursor?: string };
     error?: string;
   }>(url, context);
 
   return {
-    messages: (payload.messages ?? []).map((message) => ({
-      ts: message.ts,
-      userId: message.user ?? "",
-      text: message.text ?? "",
-    })),
+    messages: (payload.messages ?? []).map((message) => normalizeSlackMessage(message)),
     hasMore: payload.has_more ?? false,
+    nextCursor: payload.response_metadata?.next_cursor ?? "",
   };
 }
 
@@ -1105,6 +1114,68 @@ function normalizeConversation(conversation: Record<string, unknown>): Record<st
     purpose: typeof purpose?.value === "string" ? purpose.value : null,
     userId: optionalString(conversation.user),
     locale: optionalString(conversation.locale),
+  });
+}
+
+/**
+ * Apply the shared `conversations.history` / `conversations.replies` time
+ * window. Bounds are passed through verbatim: they are Slack `ts` strings,
+ * and reformatting one (rounding, re-serializing as a number) would move the
+ * boundary Slack compares against.
+ */
+function applySlackHistoryWindow(url: URL, input: Record<string, unknown>): void {
+  if (input.oldest != null) {
+    url.searchParams.set("oldest", String(input.oldest));
+  }
+  if (input.latest != null) {
+    url.searchParams.set("latest", String(input.latest));
+  }
+  if (input.inclusive != null) {
+    url.searchParams.set("inclusive", String(input.inclusive));
+  }
+}
+
+/**
+ * Normalize one `conversations.history` / `conversations.replies` message.
+ *
+ * `ts` and `text` keep their previous always-present shape (an absent text is
+ * `""`, not omitted) because consumers already read them unconditionally;
+ * every field added since is omitted when Slack does not send it, so a
+ * missing value stays distinguishable from an empty one. `userId` is the one
+ * exception kept for compatibility: it stays `""` on a message with no
+ * author, where `botId` / `username` carry the identity instead.
+ */
+function normalizeSlackMessage(message: Record<string, unknown>): Record<string, unknown> {
+  const edited = optionalRecord(message.edited) ?? {};
+  const reactions = Array.isArray(message.reactions) ? message.reactions : undefined;
+
+  return compactObject({
+    ts: requiredString(message.ts, "message ts", () => slackResponseError("conversations message ts")),
+    type: optionalString(message.type),
+    subtype: optionalString(message.subtype),
+    userId: optionalString(message.user) ?? "",
+    botId: optionalString(message.bot_id),
+    appId: optionalString(message.app_id),
+    username: optionalString(message.username),
+    teamId: optionalString(message.team),
+    clientMsgId: optionalString(message.client_msg_id),
+    text: typeof message.text === "string" ? message.text : "",
+    editedTs: optionalString(edited.ts),
+    threadTs: optionalString(message.thread_ts),
+    parentUserId: optionalString(message.parent_user_id),
+    replyCount: optionalInteger(message.reply_count),
+    replyUsersCount: optionalInteger(message.reply_users_count),
+    latestReply: optionalString(message.latest_reply),
+    isLocked: optionalBoolean(message.is_locked),
+    reactions: reactions?.map((reaction) => normalizeSlackReaction(optionalRecord(reaction) ?? {})),
+  });
+}
+
+function normalizeSlackReaction(reaction: Record<string, unknown>): Record<string, unknown> {
+  return compactObject({
+    name: optionalString(reaction.name),
+    count: optionalInteger(reaction.count),
+    userIds: Array.isArray(reaction.users) ? reaction.users.map((user) => String(user)) : undefined,
   });
 }
 

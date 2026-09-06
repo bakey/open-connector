@@ -321,6 +321,228 @@ describe("get_channel_messages pagination", () => {
   });
 });
 
+describe("conversation history time window", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    { actionId: "slack.get_channel_messages", input: { channelId: "C024BE91L" } },
+    { actionId: "slack.get_thread", input: { channelId: "C024BE91L", threadTs: "1700000000.000100" } },
+  ])("passes oldest, latest and inclusive through to $actionId verbatim", async ({ actionId, input }) => {
+    const execute = slackExecutors[actionId]!;
+    const seen: URL[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (target: RequestInfo | URL) => {
+        seen.push(new URL(target.toString()));
+        return Response.json({ ok: true, messages: [], has_more: false });
+      }),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    await expect(
+      execute({ ...input, oldest: "1700000000.123456", latest: "1700003600.000000", inclusive: true }, context),
+    ).resolves.toMatchObject({ ok: true });
+
+    // Verbatim: a bound Slack compares against its own `ts` must not be
+    // rounded, re-scaled, or re-serialized on the way through.
+    expect(seen[0]!.searchParams.get("oldest")).toBe("1700000000.123456");
+    expect(seen[0]!.searchParams.get("latest")).toBe("1700003600.000000");
+    expect(seen[0]!.searchParams.get("inclusive")).toBe("true");
+  });
+
+  it.each([
+    { actionId: "slack.get_channel_messages", input: { channelId: "C024BE91L" } },
+    { actionId: "slack.get_thread", input: { channelId: "C024BE91L", threadTs: "1700000000.000100" } },
+  ])("omits window parameters $actionId was not given", async ({ actionId, input }) => {
+    const execute = slackExecutors[actionId]!;
+    const seen: URL[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (target: RequestInfo | URL) => {
+        seen.push(new URL(target.toString()));
+        return Response.json({ ok: true, messages: [], has_more: false });
+      }),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    await expect(execute(input, context)).resolves.toMatchObject({ ok: true });
+
+    for (const key of ["oldest", "latest", "inclusive"]) {
+      expect(seen[0]!.searchParams.has(key)).toBe(false);
+    }
+  });
+
+  it.each(["slack.get_channel_messages", "slack.get_thread"])(
+    "accepts a limit up to conversations.history's 999 ceiling on %s",
+    (actionId) => {
+      const action = slackActions.find((candidate) => candidate.id === actionId)!;
+      const base =
+        actionId === "slack.get_thread"
+          ? { channelId: "C024BE91L", threadTs: "1700000000.000100" }
+          : { channelId: "C024BE91L" };
+      expect(validateActionInput(action, { ...base, limit: 999 }).valid).toBe(true);
+      expect(validateActionInput(action, { ...base, limit: 1000 }).valid).toBe(false);
+    },
+  );
+
+  it("paginates a thread by cursor", async () => {
+    const execute = slackExecutors["slack.get_thread"]!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (target: RequestInfo | URL) => {
+        expect(new URL(target.toString()).searchParams.get("cursor")).toBe("bmV4dF90czox");
+        return Response.json({
+          ok: true,
+          messages: [{ ts: "1700000000.000200", user: "U023BECGF", text: "reply" }],
+          has_more: true,
+          response_metadata: { next_cursor: "bmV4dF90czoy" },
+        });
+      }),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    await expect(
+      execute({ channelId: "C024BE91L", threadTs: "1700000000.000100", cursor: "bmV4dF90czox" }, context),
+    ).resolves.toMatchObject({
+      ok: true,
+      output: { hasMore: true, nextCursor: "bmV4dF90czoy" },
+    });
+  });
+});
+
+describe("message normalization", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the fields beyond ts/userId/text that Slack returned", async () => {
+    const execute = slackExecutors["slack.get_channel_messages"]!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          ok: true,
+          has_more: false,
+          messages: [
+            {
+              type: "message",
+              subtype: "bot_message",
+              ts: "1700000000.123456",
+              bot_id: "B0G9QF9C6",
+              app_id: "A0G9QF9C6",
+              username: "deploybot",
+              team: "T024BE7LD",
+              client_msg_id: "3d1b0a3e-0000-4000-8000-000000000000",
+              text: "shipped",
+              edited: { user: "U023BECGF", ts: "1700000001.000000" },
+              thread_ts: "1700000000.123456",
+              parent_user_id: "U023BECGF",
+              reply_count: 2,
+              reply_users_count: 1,
+              latest_reply: "1700000100.000000",
+              is_locked: true,
+              reactions: [{ name: "tada", count: 2, users: ["U1", "U2"] }],
+              blocks: [{ type: "section" }],
+            },
+          ],
+        }),
+      ),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    const result = (await execute({ channelId: "C024BE91L" }, context)) as {
+      ok: true;
+      output: { messages: Array<Record<string, unknown>> };
+    };
+
+    expect(result.output.messages[0]).toEqual({
+      ts: "1700000000.123456",
+      type: "message",
+      subtype: "bot_message",
+      userId: "",
+      botId: "B0G9QF9C6",
+      appId: "A0G9QF9C6",
+      username: "deploybot",
+      teamId: "T024BE7LD",
+      clientMsgId: "3d1b0a3e-0000-4000-8000-000000000000",
+      text: "shipped",
+      editedTs: "1700000001.000000",
+      threadTs: "1700000000.123456",
+      parentUserId: "U023BECGF",
+      replyCount: 2,
+      replyUsersCount: 1,
+      latestReply: "1700000100.000000",
+      isLocked: true,
+      reactions: [{ name: "tada", count: 2, userIds: ["U1", "U2"] }],
+    });
+    // Declared but unsent fields are omitted rather than emitted empty, so a
+    // reader can tell "Slack said nothing" from "Slack said nothing here".
+    expect(result.output.messages[0]).not.toHaveProperty("blocks");
+  });
+
+  it("omits every optional field on a bare message", async () => {
+    const execute = slackExecutors["slack.get_channel_messages"]!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          ok: true,
+          has_more: false,
+          messages: [{ ts: "1700000000.123456", user: "U023BECGF", text: "hi" }],
+        }),
+      ),
+    );
+    const context: ExecutionContext = {
+      getCredential: async () => apiKeyCredential("xoxb-bot-token"),
+    };
+
+    const result = (await execute({ channelId: "C024BE91L" }, context)) as {
+      ok: true;
+      output: { messages: Array<Record<string, unknown>> };
+    };
+
+    expect(result.output.messages[0]).toEqual({
+      ts: "1700000000.123456",
+      userId: "U023BECGF",
+      text: "hi",
+    });
+  });
+
+  it.each([
+    { actionId: "slack.get_channel_messages", key: "get_channel_messages" },
+    { actionId: "slack.get_thread", key: "get_thread" },
+  ])("declares an output schema $key rows validate against", ({ actionId }) => {
+    const action = slackActions.find((candidate) => candidate.id === actionId)!;
+    const output = new Validator(action.outputSchema);
+    expect(
+      output.validate({
+        messages: [
+          {
+            ts: "1700000000.123456",
+            userId: "U023BECGF",
+            text: "hi",
+            threadTs: "1700000000.123456",
+            replyCount: 2,
+            reactions: [{ name: "tada", count: 2, userIds: ["U1"] }],
+          },
+        ],
+        hasMore: false,
+        nextCursor: "",
+      }).valid,
+    ).toBe(true);
+  });
+});
+
 describe("Slack current credential identity", () => {
   afterEach(() => vi.unstubAllGlobals());
 
