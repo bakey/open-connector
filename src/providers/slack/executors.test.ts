@@ -329,7 +329,7 @@ describe("conversation history time window", () => {
   it.each([
     { actionId: "slack.get_channel_messages", input: { channelId: "C024BE91L" } },
     { actionId: "slack.get_thread", input: { channelId: "C024BE91L", threadTs: "1700000000.000100" } },
-  ])("passes oldest, latest and inclusive through to $actionId verbatim", async ({ actionId, input }) => {
+  ] as const)("passes oldest, latest and inclusive through to $actionId verbatim", async ({ actionId, input }) => {
     const execute = slackExecutors[actionId]!;
     const seen: URL[] = [];
     vi.stubGlobal(
@@ -357,7 +357,7 @@ describe("conversation history time window", () => {
   it.each([
     { actionId: "slack.get_channel_messages", input: { channelId: "C024BE91L" } },
     { actionId: "slack.get_thread", input: { channelId: "C024BE91L", threadTs: "1700000000.000100" } },
-  ])("omits window parameters $actionId was not given", async ({ actionId, input }) => {
+  ] as const)("omits window parameters $actionId was not given", async ({ actionId, input }) => {
     const execute = slackExecutors[actionId]!;
     const seen: URL[] = [];
     vi.stubGlobal(
