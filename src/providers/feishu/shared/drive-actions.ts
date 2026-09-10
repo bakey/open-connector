@@ -14,7 +14,7 @@ export const feishuDriveProviderScopes = {
   commentCreate: "docs:document.comment:create",
   commentUpdate: "docs:document.comment:update",
   commentDelete: "docs:document.comment:delete",
-  permissionRead: "docs:permission.member:readonly",
+  permissionRead: "docs:permission.member:retrieve",
   permissionCreate: "docs:permission.member:create",
   permissionUpdate: "docs:permission.member:update",
   permissionDelete: "docs:permission.member:delete",
