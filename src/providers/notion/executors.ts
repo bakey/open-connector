@@ -337,42 +337,82 @@ async function notionRetrievePage(input: Record<string, unknown>, accessToken: s
 }
 
 /**
- * One page as Markdown — a constructed row, not a forwarded body.
+ * The revision of whatever `pageId` names, and the reachability check that
+ * comes with reading it.
  *
- * Two requests, page object first: `GET /pages/{id}` is the cheap question
- * ("can this grant reach the page, and when did it last change") and answers
- * a 404 before the expensive render is attempted. The markdown response has
- * no revision of its own, so `lastEditedTime` comes from the page object.
- * `pageId` is echoed from the INPUT: Notion may spell an id dashed or
- * undashed in its own body, and a consumer joining rows to bindings needs
- * the spelling it asked with.
+ * **Pages and blocks both**, because this action's input has always been
+ * documented as "the page or block ID" and its description as "a Notion page
+ * **or block subtree**". A preflight that only knew `GET /pages/{id}` turned
+ * the advertised block-subtree flow into a 404 before the render was ever
+ * attempted — Notion answers `object_not_found` for a block id there.
+ *
+ * Pages first, since that is the overwhelmingly common input and costs one
+ * request; a 404 falls through to `/blocks/{id}`, which carries its own
+ * `last_edited_time`. Any other status propagates unchanged: a 401, 403 or
+ * 429 is an answer about the credential, not about which kind of id this is,
+ * and retrying it against a second endpoint would only double the cost and
+ * blur the error.
+ */
+async function notionLastEditedTime(id: string, accessToken: string, fetcher: typeof fetch) {
+  for (const path of [`/pages/${id}`, `/blocks/${id}`]) {
+    let object: NotionObject;
+    try {
+      object = (await notionRequest<NotionObject>(accessToken, { path }, fetcher)) ?? {};
+    } catch (error) {
+      if (error instanceof ProviderRequestError && error.status === 404 && !path.startsWith("/blocks/")) {
+        continue;
+      }
+      throw error;
+    }
+
+    const lastEditedTime = asNonEmptyString(object.last_edited_time);
+    if (lastEditedTime) {
+      return lastEditedTime;
+    }
+  }
+
+  throw new ProviderRequestError(502, `Notion returned ${id} without a last_edited_time`);
+}
+
+/**
+ * One page or block subtree as Markdown.
+ *
+ * Two requests, the object first: it is the cheap question ("can this grant
+ * reach this, and when did it last change") and answers a 404 before the
+ * expensive render is attempted. The markdown response has no revision of its
+ * own, so `lastEditedTime` comes from that object.
+ *
+ * **Notion's fields keep Notion's names.** This action shipped with the
+ * provider, so its body is a contract SDK and CLI callers already read; the
+ * response is forwarded and the two constructed fields are added beside it.
+ * `pageId` is echoed from the INPUT — Notion may spell an id dashed or
+ * undashed in its own body, and a consumer joining rows to bindings needs the
+ * spelling it asked with.
  */
 async function notionRetrievePageMarkdown(input: Record<string, unknown>, accessToken: string, fetcher: typeof fetch) {
   const pageId = String(input.pageId);
-  const page = (await notionRequest<NotionObject>(accessToken, { path: `/pages/${pageId}` }, fetcher)) ?? {};
-  const lastEditedTime = asNonEmptyString(page.last_edited_time);
-  if (!lastEditedTime) {
-    throw new ProviderRequestError(502, `Notion returned page ${pageId} without a last_edited_time`);
-  }
+  const lastEditedTime = await notionLastEditedTime(pageId, accessToken, fetcher);
   const rendered =
     (await notionRequest<NotionObject>(
       accessToken,
       {
         path: `/pages/${pageId}/markdown`,
         query: compactQuery({
-          include_transcript: typeof input.includeTranscript === "boolean" ? String(input.includeTranscript) : undefined,
+          include_transcript:
+            typeof input.includeTranscript === "boolean" ? String(input.includeTranscript) : undefined,
         }),
       },
       fetcher,
     )) ?? {};
 
   return {
-    pageId,
+    ...rendered,
     markdown: typeof rendered.markdown === "string" ? rendered.markdown : "",
     truncated: rendered.truncated === true,
-    unknownBlockIds: Array.isArray(rendered.unknown_block_ids)
+    unknown_block_ids: Array.isArray(rendered.unknown_block_ids)
       ? rendered.unknown_block_ids.filter((id): id is string => typeof id === "string")
       : [],
+    pageId,
     lastEditedTime,
   };
 }

@@ -104,6 +104,7 @@ describe("notion.retrieve_page_markdown", () => {
       calls.push({ url, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
       if (url.endsWith(`/v1/pages/${PAGE}`)) return jsonResponse(pageBody);
       if (url.includes(`/v1/pages/${PAGE}/markdown`)) return jsonResponse(markdownBody);
+      if (url.endsWith(`/v1/blocks/${PAGE}`)) return jsonResponse(pageBody);
       return jsonResponse({ object: "error", code: "object_not_found", message: url }, 404);
     });
     return { fetcher, calls };
@@ -126,13 +127,20 @@ describe("notion.retrieve_page_markdown", () => {
       { object: "page", id: PAGE.toLowerCase(), last_edited_time: "2026-09-01T10:00:00.000Z" },
       { object: "page_markdown", id: PAGE.toLowerCase(), markdown: "# Hi", truncated: false, unknown_block_ids: [] },
     );
+    // **Notion's own fields keep Notion's names and survive verbatim**, and
+    // the two constructed ones are additive. This action shipped with the
+    // provider, so `object`, `id` and `unknown_block_ids` are a contract
+    // existing SDK/CLI callers already read — an earlier revision renamed and
+    // dropped them, which `toEqual` here exists to stop coming back.
     expect(result).toEqual({
       ok: true,
       output: {
-        pageId: PAGE,
+        object: "page_markdown",
+        id: PAGE.toLowerCase(),
         markdown: "# Hi",
         truncated: false,
-        unknownBlockIds: [],
+        unknown_block_ids: [],
+        pageId: PAGE,
         lastEditedTime: "2026-09-01T10:00:00.000Z",
       },
     });
@@ -152,7 +160,7 @@ describe("notion.retrieve_page_markdown", () => {
       { object: "page", id: PAGE, last_edited_time: "2026-09-01T10:00:00.000Z" },
       { object: "page_markdown", id: PAGE },
     );
-    expect(result).toMatchObject({ ok: true, output: { markdown: "", truncated: false, unknownBlockIds: [] } });
+    expect(result).toMatchObject({ ok: true, output: { markdown: "", truncated: false, unknown_block_ids: [] } });
   });
 
   it("keeps a partial render's evidence and drops non-string ids", async () => {
@@ -160,7 +168,7 @@ describe("notion.retrieve_page_markdown", () => {
       { object: "page", id: PAGE, last_edited_time: "2026-09-01T10:00:00.000Z" },
       { object: "page_markdown", id: PAGE, markdown: "…", truncated: true, unknown_block_ids: ["b1", 7, "b2"] },
     );
-    expect(result).toMatchObject({ ok: true, output: { truncated: true, unknownBlockIds: ["b1", "b2"] } });
+    expect(result).toMatchObject({ ok: true, output: { truncated: true, unknown_block_ids: ["b1", "b2"] } });
   });
 
   it("forwards includeTranscript as Notion's query parameter", async () => {
@@ -177,10 +185,12 @@ describe("notion.retrieve_page_markdown", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "provider_error" } });
   });
 
-  it("answers a page this grant cannot reach before attempting the render", async () => {
-    const { fetcher } = notionApi(undefined, undefined);
-    fetcher.mockImplementationOnce(async () =>
-      jsonResponse({ object: "error", code: "object_not_found", message: "Could not find page" }, 404),
+  it("answers an id this grant cannot reach before attempting the render", async () => {
+    // Neither endpoint knows it: both preflights 404 and the render is never
+    // attempted. Two requests, not one — a 404 from `/pages` is not evidence
+    // the id is unreachable, only that it is not a PAGE.
+    const fetcher = vi.fn(async (input: string | URL | Request) =>
+      jsonResponse({ object: "error", code: "object_not_found", message: String(input) }, 404),
     );
     vi.stubGlobal("fetch", fetcher);
     try {
@@ -189,6 +199,70 @@ describe("notion.retrieve_page_markdown", () => {
         contextFor(grant(userGrant())),
       );
       expect(result).toMatchObject({ ok: false, error: { details: { status: 404 } } });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls.map((c) => String(c[0]))).toEqual([
+        `https://api.notion.com/v1/pages/${PAGE}`,
+        `https://api.notion.com/v1/blocks/${PAGE}`,
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  /// **The advertised block-subtree flow.**
+  ///
+  /// This action's input has always been documented as "the page or block ID"
+  /// and its description as "a Notion page **or block subtree**". A preflight
+  /// that only knew `GET /pages/{id}` returned Notion's 404 before the render
+  /// was reached, silently retiring that flow.
+  it("renders a BLOCK subtree, reading its revision from the block object", async () => {
+    const BLOCK = "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9";
+    const seen: string[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.endsWith(`/v1/pages/${BLOCK}`)) {
+        return jsonResponse({ object: "error", code: "object_not_found", message: "not a page" }, 404);
+      }
+      if (url.endsWith(`/v1/blocks/${BLOCK}`)) {
+        return jsonResponse({ object: "block", id: BLOCK, last_edited_time: "2026-09-02T08:00:00.000Z" });
+      }
+      return jsonResponse({ object: "page_markdown", id: BLOCK, markdown: "## Section", truncated: false });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const result = await executors["notion.retrieve_page_markdown"]!(
+        { pageId: BLOCK },
+        contextFor(grant(userGrant())),
+      );
+      expect(result).toMatchObject({
+        ok: true,
+        output: { pageId: BLOCK, markdown: "## Section", lastEditedTime: "2026-09-02T08:00:00.000Z" },
+      });
+      expect(seen).toEqual([
+        `https://api.notion.com/v1/pages/${BLOCK}`,
+        `https://api.notion.com/v1/blocks/${BLOCK}`,
+        `https://api.notion.com/v1/pages/${BLOCK}/markdown`,
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  /// A 403 is an answer about the CREDENTIAL, not about which kind of id this
+  /// is, so it must not be retried against the block endpoint: that would
+  /// double the cost and report the second failure in place of the first.
+  it("does not fall through to blocks on a non-404 refusal", async () => {
+    const fetcher = vi.fn(async () =>
+      jsonResponse({ object: "error", code: "restricted_resource", message: "no access" }, 403),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const result = await executors["notion.retrieve_page_markdown"]!(
+        { pageId: PAGE },
+        contextFor(grant(userGrant())),
+      );
+      expect(result).toMatchObject({ ok: false, error: { details: { status: 403 } } });
       expect(fetcher).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();

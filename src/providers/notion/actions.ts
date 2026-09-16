@@ -174,29 +174,51 @@ const pageParent = s.oneOf(
  * `notionObject`, which is right for objects whose shape belongs to Notion. A
  * rendered page is different: it is one row a consumer will map columns onto,
  * and a declared schema is what lets a consumer's fingerprint of this action
- * catch an upstream rename at registration instead of at scan time. The
- * executor constructs this record; it does not forward one.
+ * catch an upstream rename at registration instead of at scan time.
+ *
+ * **Declaring it may not silently narrow it.** `s.object` sets
+ * `additionalProperties: false`, and this action shipped with the provider —
+ * SDK and CLI callers already read the fields Notion's own body carries. So
+ * Notion's fields keep NOTION'S names and are forwarded unchanged, and the
+ * two fields this action adds are additive. An earlier revision of this
+ * schema renamed `unknown_block_ids` to `unknownBlockIds` and dropped
+ * `object`/`id`, which would have broken every existing caller on upgrade for
+ * no gain: a consumer mapping columns can read a snake_case key as easily as
+ * a camelCase one.
  */
 const notionPageMarkdownSchema = s.object(
   {
-    pageId: s.string({
-      description: "The page id the render was requested for, exactly as given in the input.",
-    }),
+    // ---- Notion's own, forwarded verbatim ------------------------------
+    // Not required: they are Notion's to send, and declaring them mandatory
+    // would turn an upstream omission into a validation failure on a render
+    // that is otherwise perfectly usable.
+    object: s.string({ description: "Notion's object tag for the rendered result." }),
+    id: s.string({ description: "The id Notion echoes for the rendered page, in Notion's own spelling." }),
     markdown: s.string({
       description: "The page rendered as enhanced Markdown. An empty string for a page with no content.",
     }),
     truncated: s.boolean({
       description:
-        "Whether the render stopped short of the whole page (Notion renders roughly 20,000 blocks at most). Resubmit the ids in unknownBlockIds to fetch what was left out.",
+        "Whether the render stopped short of the whole page (Notion renders roughly 20,000 blocks at most). Resubmit the ids in unknown_block_ids to fetch what was left out.",
     }),
-    unknownBlockIds: s.array(s.string({ description: "A block id." }), {
+    unknown_block_ids: s.array(s.string({ description: "A block id." }), {
       description:
         "Blocks rendered as <unknown>: truncated subtrees, children this grant cannot read, and unsupported block types. Non-empty on many complete pages, so not on its own a sign of a partial render.",
     }),
-    lastEditedTime: s.dateTime("When the page was last edited, read from the page object."),
+
+    // ---- Constructed here, and additive --------------------------------
+    // camelCase, matching this provider's convention for fields it builds
+    // rather than forwards (see `notionCurrentUserSchema`).
+    pageId: s.string({
+      description:
+        "The page or block id the render was requested for, exactly as given in the input. Notion may spell an id dashed or undashed in its own body, so a consumer joining rows to bindings needs the spelling it asked with.",
+    }),
+    lastEditedTime: s.dateTime(
+      "When the page or block was last edited, read from its own object — the markdown response carries no revision.",
+    ),
   },
   {
-    required: ["pageId", "markdown", "truncated", "unknownBlockIds", "lastEditedTime"],
+    required: ["markdown", "truncated", "unknown_block_ids", "pageId", "lastEditedTime"],
     description: "A Notion page rendered as Markdown, with its revision and how complete the render was.",
   },
 );
