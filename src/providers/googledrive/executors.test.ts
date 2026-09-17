@@ -183,6 +183,40 @@ describe("Google Drive files.get", () => {
   });
 });
 
+describe("Google Drive OAuth credential validation", () => {
+  it("requests only the About user field and uses its email address as the account id", async () => {
+    const requests: CapturedRequest[] = [];
+
+    const result = await credentialValidators.oauth2!(oauthCredential, {
+      fetcher: async (input, init) => {
+        requests.push({
+          url: new URL(String(input)),
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        return Response.json({ user: { emailAddress: "someone@example.com", displayName: "Someone" } });
+      },
+    });
+
+    expect(result).toMatchObject({
+      profile: { accountId: "someone@example.com", displayName: "Someone" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url.pathname).toBe("/drive/v3/about");
+    expect(Object.fromEntries(requests[0]!.url.searchParams)).toEqual({ fields: "user" });
+    expect(requests[0]?.authorization).toBe("Bearer drive-access-token");
+  });
+
+  it("falls back to the generic account id when the About user has no email address", async () => {
+    const result = await credentialValidators.oauth2!(oauthCredential, {
+      fetcher: async () => Response.json({ user: { displayName: "No Mail" } }),
+    });
+
+    expect(result).toMatchObject({
+      profile: { accountId: "googledrive:oauth2", displayName: "No Mail" },
+    });
+  });
+});
+
 function stubGoogleResponses(responses: Response[]): CapturedRequest[] {
   const requests: CapturedRequest[] = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -243,57 +277,3 @@ async function executeGet(input: Record<string, unknown>, transitFiles?: Transit
     context,
   );
 }
-
-describe("Google Drive OAuth credential validation", () => {
-  it("selects only `user`, which is the only field the About resource carries it under", async () => {
-    let seen: URL | undefined;
-    const result = await credentialValidators.oauth2!(
-      {
-        authType: "oauth2",
-        accessToken: "drive-oauth-token",
-        tokenType: "Bearer",
-        profile: { accountId: "oauth2", displayName: "OAuth Credential", grantedScopes: [] },
-        metadata: {},
-      },
-      {
-        fetcher: async (url, init) => {
-          seen = new URL(url.toString());
-          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer drive-oauth-token");
-          return Response.json({
-            user: { emailAddress: "someone@example.com", displayName: "Someone" },
-          });
-        },
-      },
-    );
-
-    // The regression this pins: `fields=user,emailAddress` made Drive reject
-    // the WHOLE selection — `400 Invalid field selection emailAddress`, because
-    // the About resource has no top-level `emailAddress`. The validator then
-    // threw on every connection, and a failed validator is treated as optional,
-    // so the credential was stored with the placeholder profile below and the
-    // connection looked healthy while carrying no identity.
-    expect(seen?.pathname).toBe("/drive/v3/about");
-    expect(seen?.searchParams.get("fields")).toBe("user");
-
-    expect(result).toMatchObject({
-      profile: { accountId: "someone@example.com", displayName: "Someone" },
-    });
-  });
-
-  it("falls back to the placeholder only when the account genuinely has no email", async () => {
-    const result = await credentialValidators.oauth2!(
-      {
-        authType: "oauth2",
-        accessToken: "drive-oauth-token",
-        tokenType: "Bearer",
-        profile: { accountId: "oauth2", displayName: "OAuth Credential", grantedScopes: [] },
-        metadata: {},
-      },
-      { fetcher: async () => Response.json({ user: { displayName: "No Mail" } }) },
-    );
-
-    expect(result).toMatchObject({
-      profile: { accountId: "googledrive:oauth2", displayName: "No Mail" },
-    });
-  });
-});

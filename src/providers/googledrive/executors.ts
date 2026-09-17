@@ -239,13 +239,7 @@ export const credentialValidators: CredentialValidators = {
       accessToken: input.accessToken,
       fetcher,
       signal,
-      // `user` only. The About resource has no top-level `emailAddress`, and
-      // Drive rejects the whole selection when one member is unknown:
-      // `400 Invalid field selection emailAddress`. That made this validator
-      // throw on every connection, and `setOAuthCredential` treats a failed
-      // validator as optional — so the credential was stored with the generic
-      // placeholder profile (`accountId: "oauth2"`) and the connection looked
-      // healthy while carrying no identity at all.
+      // About has no top-level `emailAddress`, and Drive rejects the whole selection when any listed field is unknown.
       query: { fields: "user" },
     });
     const emailAddress = profile.user?.emailAddress;
