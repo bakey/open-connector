@@ -234,15 +234,21 @@ export const executors: ProviderExecutors = defineOAuthProviderExecutors(service
 export const credentialValidators: CredentialValidators = {
   async oauth2(input, { fetcher, signal }) {
     const profile = await googleJsonRequest<{
-      emailAddress?: string;
       user?: { emailAddress?: string; displayName?: string };
     }>(`${driveApiBaseUrl}/about`, {
       accessToken: input.accessToken,
       fetcher,
       signal,
-      query: { fields: "user,emailAddress" },
+      // `user` only. The About resource has no top-level `emailAddress`, and
+      // Drive rejects the whole selection when one member is unknown:
+      // `400 Invalid field selection emailAddress`. That made this validator
+      // throw on every connection, and `setOAuthCredential` treats a failed
+      // validator as optional — so the credential was stored with the generic
+      // placeholder profile (`accountId: "oauth2"`) and the connection looked
+      // healthy while carrying no identity at all.
+      query: { fields: "user" },
     });
-    const emailAddress = profile.user?.emailAddress ?? profile.emailAddress;
+    const emailAddress = profile.user?.emailAddress;
     const displayName = profile.user?.displayName ?? emailAddress;
     return {
       profile: {
