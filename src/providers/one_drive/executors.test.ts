@@ -185,6 +185,383 @@ describe("OneDrive transit downloads", () => {
   });
 });
 
+describe("OneDrive item permissions", () => {
+  it("reads the permissions of an item by id, and reports the end of the list", async () => {
+    const requests = stubResponses([
+      Response.json({
+        value: [{ id: "perm-1", roles: ["read"], grantedToV2: { user: { id: "u1", displayName: "Ada" } } }],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "item-1" });
+
+    expect(requests[0]!.url.pathname).toBe("/v1.0/me/drive/items/item-1/permissions");
+    expect(result).toEqual({
+      ok: true,
+      output: {
+        items: [{ id: "perm-1", roles: ["read"], grantedToV2: { user: { id: "u1", displayName: "Ada" } } }],
+        // Absent `@odata.nextLink` is the end of the list, and it is reported
+        // as an explicit null rather than an omitted key: a consumer cannot
+        // tell an omitted cursor from a response shape it failed to read.
+        nextLink: null,
+      },
+    });
+  });
+
+  it("returns a personal drive's permission unchanged, both spellings included", async () => {
+    // Measured: a personal OneDrive returns `grantedTo` and omits
+    // `grantedToV2` entirely, while a work or school drive does the opposite.
+    //
+    // What this pins is the ROUND TRIP — a personal-shaped permission reaches
+    // the caller with its attribution intact. It does NOT pin the schema
+    // declaration: output schemas are not enforced on the way out, so removing
+    // `grantedTo` from `actions.ts` leaves this test green (checked). The
+    // declaration earns its place in the published catalog, which is what an
+    // SDK consumer reads to learn the field exists at all.
+    //
+    // The hand-built shape below is the DOCUMENTED one. The measured one is
+    // the test after next, and the two disagree — see it.
+    stubResponses([
+      Response.json({
+        value: [
+          {
+            id: "perm-2",
+            roles: ["owner"],
+            grantedTo: { user: { id: "u2", displayName: "Grace" } },
+            inheritedFrom: { driveId: "d1", id: "parent-1", path: "/drive/root:" },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "item-2" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        items: [
+          {
+            grantedTo: { user: { id: "u2", displayName: "Grace" } },
+            // `inheritedFrom` is personal-only and is the difference between
+            // "shared here" and "shared above"; dropping it would make a
+            // folder's own sharing indistinguishable from its parent's.
+            inheritedFrom: { id: "parent-1" },
+          },
+        ],
+      },
+    });
+  });
+
+  it("returns a real personal-drive owner permission verbatim, siteUser and all", async () => {
+    // **The measured shape**, from one real personal OneDrive on 2026-09-17
+    // (the address is redacted; nothing else is changed). It is here because
+    // every part of it contradicts what the documented resource suggests:
+    //
+    //   * `grantedToV2` IS present on a personal drive — the deprecated
+    //     `grantedTo` is not a substitute for it, both arrive — but it carries
+    //     `siteUser`, NOT `user`. A consumer reading `grantedToV2.user` finds
+    //     nothing and silently falls through.
+    //   * `user.id` is `"4"`. That is a SharePoint site-local user index, not
+    //     a directory object id: `loginName` is the claims encoding that says
+    //     so, and the drive's own `createdBy.user.id` on the same account is
+    //     the 16-hex CID instead. Two id spaces, one drive, two endpoints.
+    //   * the only identifier that is the same person anywhere else is the
+    //     EMAIL, which also appears inside `loginName` and, base64url-encoded,
+    //     as `id` and `shareId`.
+    //
+    // This action returns all of it and decides none of it. Which field a
+    // consumer keys on is a consumer's decision, and it cannot make a good one
+    // against a shape it never sees.
+    //
+    // What this test pins is the RETURN PATH: `readCollectionItems` hands the
+    // page's items back untouched, including fields no schema names —
+    // `siteUser.email` and `siteUser.loginName` are not in `identity`, and
+    // they arrive anyway. It does NOT pin the schema declarations: output
+    // schemas are not enforced on the way out here, and making either
+    // `permission` or `identity` strict (`s.object`, `additionalProperties:
+    // false`) leaves every test in this file green (checked). The declarations
+    // are the PUBLISHED CATALOG's contract — what an SDK consumer generates
+    // types from — not a runtime guard, and reading them as one is the wrong
+    // assumption to inherit from this file.
+    stubResponses([
+      Response.json({
+        value: [
+          {
+            id: "aTowIy5mfG1lbWJlcnNoaXB8c29tZW9uZUBleGFtcGxlLmNvbQ",
+            roles: ["owner"],
+            shareId: "aTowIy5mfG1lbWJlcnNoaXB8c29tZW9uZUBleGFtcGxlLmNvbQ",
+            grantedToV2: {
+              siteUser: {
+                displayName: "Example Owner",
+                email: "someone@example.com",
+                id: "4",
+                loginName: "i:0#.f|membership|someone@example.com",
+              },
+            },
+            grantedTo: {
+              user: { displayName: "Example Owner", email: "someone@example.com", id: "4" },
+            },
+            link: { webUrl: "https://1drv.ms/f/c/EXAMPLECID/AsExampleShareToken" },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "item-owner" });
+
+    expect(result).toEqual({
+      ok: true,
+      output: {
+        items: [
+          {
+            id: "aTowIy5mfG1lbWJlcnNoaXB8c29tZW9uZUBleGFtcGxlLmNvbQ",
+            roles: ["owner"],
+            shareId: "aTowIy5mfG1lbWJlcnNoaXB8c29tZW9uZUBleGFtcGxlLmNvbQ",
+            grantedToV2: {
+              siteUser: {
+                displayName: "Example Owner",
+                email: "someone@example.com",
+                id: "4",
+                loginName: "i:0#.f|membership|someone@example.com",
+              },
+            },
+            grantedTo: {
+              user: { displayName: "Example Owner", email: "someone@example.com", id: "4" },
+            },
+            link: { webUrl: "https://1drv.ms/f/c/EXAMPLECID/AsExampleShareToken" },
+          },
+        ],
+        nextLink: null,
+      },
+    });
+  });
+
+  it("keeps a specific-people link's identities, which carry no id at all", async () => {
+    // **The measured shape**, 2026-09-17, a specific-people link on a personal
+    // drive (address redacted). The first version of this test invented
+    // `{ id: "u3", displayName: "Alan" }` — an identity with an id and a human
+    // name. The wire sends neither:
+    //
+    //   * there is **no `id`**. Not a site index, not a GUID, not a CID. A
+    //     consumer keying a grantee on an id has nothing to key on.
+    //   * `displayName` IS the address, which is the unredeemed-invitation
+    //     tell: Microsoft has no account to name yet.
+    //   * the member key is **`user`**, while the owner's direct grant in
+    //     `grantedToV2` uses **`siteUser`**. Same identity-set type, two
+    //     different members, decided by which container it sits in.
+    //
+    // An invented fixture would have let a consumer build against a field the
+    // provider never sends, which is the whole reason this one is measured.
+    stubResponses([
+      Response.json({
+        value: [
+          {
+            id: "ef759386-fa2e-47db-adff-f9635ef5115b",
+            roles: ["read"],
+            hasPassword: false,
+            grantedToIdentitiesV2: [
+              {
+                user: {
+                  "@odata.type": "#microsoft.graph.sharePointIdentity",
+                  displayName: "someone@example.com",
+                  email: "someone@example.com",
+                },
+              },
+            ],
+            grantedToIdentities: [{ user: { displayName: "someone@example.com", email: "someone@example.com" } }],
+            link: { scope: "users", type: "view", preventsDownload: false },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "item-3" });
+
+    expect(result).toEqual({
+      ok: true,
+      output: {
+        items: [
+          {
+            id: "ef759386-fa2e-47db-adff-f9635ef5115b",
+            roles: ["read"],
+            hasPassword: false,
+            grantedToIdentitiesV2: [
+              {
+                user: {
+                  "@odata.type": "#microsoft.graph.sharePointIdentity",
+                  displayName: "someone@example.com",
+                  email: "someone@example.com",
+                },
+              },
+            ],
+            grantedToIdentities: [{ user: { displayName: "someone@example.com", email: "someone@example.com" } }],
+            link: { scope: "users", type: "view", preventsDownload: false },
+          },
+        ],
+        nextLink: null,
+      },
+    });
+  });
+
+  it("keeps an inherited grant's inheritedFrom, which is the only thing that says where it came from", async () => {
+    // Measured 2026-09-17 on a child of a shared folder (identifiers
+    // redacted, shapes intact). This is the entry a consumer needs most and
+    // the one most easily lost:
+    //
+    //   * `inheritedFrom` is PRESENT on a personal drive, and it is the only
+    //     field distinguishing "granted on this file" from "granted on an
+    //     ancestor". Nothing else in the entry says.
+    //   * it is richer than the documented `itemReference` — it carries
+    //     `shareId` and a whole `sharepointIds` object, neither of which any
+    //     schema here names. They survive because the action returns the page
+    //     verbatim.
+    //   * the inherited entry carries the SAME `id` and `shareId` as the
+    //     folder's own entry, which is the third place a permission id turns
+    //     out not to be per-item.
+    stubResponses([
+      Response.json({
+        value: [
+          {
+            id: "9c7284f8-655c-47f5-8cac-b54b4846300b",
+            roles: ["read"],
+            hasPassword: false,
+            grantedToIdentitiesV2: [{ user: { displayName: "someone@example.com", email: "someone@example.com" } }],
+            grantedToIdentities: [{ user: { displayName: "someone@example.com", email: "someone@example.com" } }],
+            inheritedFrom: {
+              driveId: "EXAMPLECID",
+              driveType: "personal",
+              id: "EXAMPLECID!s4c54abc634f4204d8071f30f00000000",
+              name: "Downloads",
+              path: "/drives/EXAMPLECID/root:/Docs/Downloads",
+              shareId: "u!aHR0cHM6Ly9leGFtcGxl",
+              sharepointIds: {
+                listItemId: "4081",
+                listItemUniqueId: "4c54abc6-34f4-204d-8071-f30f00000000",
+              },
+            },
+            link: { scope: "users", type: "view", preventsDownload: false },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "child-1" });
+    const [item] = (result as { output: { items: Record<string, unknown>[] } }).output.items;
+
+    expect(item!.inheritedFrom).toEqual({
+      driveId: "EXAMPLECID",
+      driveType: "personal",
+      id: "EXAMPLECID!s4c54abc634f4204d8071f30f00000000",
+      name: "Downloads",
+      path: "/drives/EXAMPLECID/root:/Docs/Downloads",
+      // Undeclared by `driveItemReference` and returned anyway — the property
+      // that makes this action safe to build an admission rule on.
+      shareId: "u!aHR0cHM6Ly9leGFtcGxl",
+      sharepointIds: {
+        listItemId: "4081",
+        listItemUniqueId: "4c54abc6-34f4-204d-8071-f30f00000000",
+      },
+    });
+  });
+
+  it("keeps an anonymous link's EMPTY identity arrays, which are present and not absent", async () => {
+    // Measured on the same file: OneDrive personal's default share is an
+    // anonymous link. The arrays arrive empty rather than missing, so testing
+    // for the key is not a test for "somebody is granted" — and there is no
+    // `grantedTo` on the entry at all.
+    stubResponses([
+      Response.json({
+        value: [
+          {
+            id: "10db1af6-12db-4ab8-93b7-acf0aadc5fb8",
+            roles: ["read"],
+            hasPassword: false,
+            grantedToIdentitiesV2: [],
+            grantedToIdentities: [],
+            link: { scope: "anonymous", type: "view", preventsDownload: false },
+          },
+        ],
+      }),
+    ]);
+
+    const result = await executeOneDriveAction("list_item_permissions", { itemId: "item-anon" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        items: [
+          {
+            grantedToIdentitiesV2: [],
+            grantedToIdentities: [],
+            link: { scope: "anonymous" },
+          },
+        ],
+      },
+    });
+    const [item] = (result as { output: { items: Record<string, unknown>[] } }).output.items;
+    expect(item, "an anonymous link names nobody").not.toHaveProperty("grantedTo");
+    expect(item).not.toHaveProperty("grantedToV2");
+  });
+
+  it("addresses an item by path, and a named drive", async () => {
+    const byPath = stubResponses([Response.json({ value: [] })]);
+    await executeOneDriveAction("list_item_permissions", { itemPath: "/Reports/Q3" });
+    expect(byPath[0]!.url.pathname).toBe("/v1.0/me/drive/root:/Reports/Q3:/permissions");
+
+    const byDrive = stubResponses([Response.json({ value: [] })]);
+    await executeOneDriveAction("list_item_permissions", { driveId: "drive-9", itemId: "item-4" });
+    expect(byDrive[0]!.url.pathname).toBe("/v1.0/drives/drive-9/items/item-4/permissions");
+  });
+
+  it("follows a permission nextLink and refuses one that points elsewhere", async () => {
+    const followed = stubResponses([Response.json({ value: [{ id: "perm-4", roles: ["read"] }] })]);
+    const ok = await executeOneDriveAction("list_item_permissions", {
+      itemId: "item-5",
+      nextLink: "https://graph.microsoft.com/v1.0/me/drive/items/item-5/permissions?$skiptoken=abc",
+    });
+    expect(ok).toMatchObject({ ok: true });
+    expect(followed[0]!.url.searchParams.get("$skiptoken")).toBe("abc");
+
+    // The cursor is a string Microsoft Graph put in a response body. Following
+    // it unchecked would let one response redirect this action at any other
+    // endpoint the token can reach — a token minted to read one folder's ACL
+    // reading the signed-in user's mail, say.
+    //
+    // BOTH shapes are refused, and the second is the one that matters. A path
+    // outside the drive is caught by `readDrivePathSuffix` returning null, so
+    // a test using only that would pass with the endpoint check deleted
+    // entirely (checked). The children endpoint is a drive path that reaches
+    // the endpoint check, and it is the confusion this policy exists for:
+    // three paginated actions share one request builder.
+    for (const elsewhere of [
+      "https://graph.microsoft.com/v1.0/me/messages",
+      "https://graph.microsoft.com/v1.0/me/drive/items/item-5/children",
+    ]) {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+      const refused = await executeOneDriveAction("list_item_permissions", {
+        itemId: "item-5",
+        nextLink: elsewhere,
+      });
+      expect(refused, elsewhere).toMatchObject({
+        ok: false,
+        error: { message: "nextLink must target OneDrive permission pagination endpoints" },
+      });
+      expect(fetch, elsewhere).not.toHaveBeenCalled();
+    }
+  });
+
+  it("requires an item to ask about", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await executeOneDriveAction("list_item_permissions", {});
+
+    expect(result).toMatchObject({ ok: false, error: { message: "itemId or itemPath is required" } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 function stubResponses(responses: Response[]): CapturedRequest[] {
   const requests: CapturedRequest[] = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -229,10 +606,8 @@ function createTransitFileStore(maxBytes: number): {
   };
 }
 
-type OneDriveDownloadAction = "download_file" | "download_file_by_path" | "download_item_as_format";
-
 async function executeOneDriveAction(
-  actionName: OneDriveDownloadAction,
+  actionName: string,
   input: Record<string, unknown>,
   transitFiles?: TransitFileStore,
   signal?: AbortSignal,

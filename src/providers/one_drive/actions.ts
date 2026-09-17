@@ -116,6 +116,74 @@ const listDriveItemsOutput = s.object(
   },
   { required: ["items", "nextLink"], description: "OneDrive list response." },
 );
+const sharePointIdentitySet = s.looseObject(
+  {
+    user: identity,
+    application: identity,
+    device: identity,
+    group: identity,
+    siteUser: identity,
+    siteGroup: identity,
+  },
+  { description: "SharePoint identity set returned by Microsoft Graph sharing responses." },
+);
+const sharingLink = s.looseObject(
+  {
+    type: s.string({ description: "Link type, such as view, edit, or embed." }),
+    scope: s.string({ description: "Link scope, such as anonymous, organization, or users." }),
+    webUrl: s.string({ description: "URL that opens the shared item." }),
+    preventsDownload: s.boolean({ description: "Whether the link blocks downloading." }),
+  },
+  { description: "Sharing link facet of a permission." },
+);
+const sharingInvitation = s.looseObject(
+  {
+    email: s.string({ description: "Email address the invitation was sent to." }),
+    signInRequired: s.boolean({ description: "Whether the invitee must sign in to use it." }),
+    invitedBy: identitySet,
+  },
+  { description: "Sharing invitation facet of a permission." },
+);
+const permission = s.looseObject(
+  {
+    id: nonEmptyString("Permission ID."),
+    roles: s.array(s.string({ description: "A role this permission grants." }), {
+      description: "Roles the permission grants, such as read, write, or owner.",
+    }),
+    // Both spellings, deliberately. `grantedToV2` is the current field and is
+    // what a work or school drive answers with; a personal OneDrive still
+    // answers with the deprecated `grantedTo` and omits V2 entirely, so a
+    // caller that reads only one of them sees an unattributed grant on half
+    // the drives Microsoft sells.
+    grantedTo: identitySet,
+    grantedToV2: sharePointIdentitySet,
+    grantedToIdentities: s.array(identitySet, {
+      description: "Identities a specific-people link was shared with (deprecated spelling).",
+    }),
+    grantedToIdentitiesV2: s.array(sharePointIdentitySet, {
+      description: "Identities a specific-people link was shared with.",
+    }),
+    link: sharingLink,
+    invitation: sharingInvitation,
+    // Personal drives only. Present means the permission is inherited from an
+    // ancestor rather than set on this item, which is the difference between
+    // "shared here" and "shared above"; a consumer that ignores it cannot
+    // tell a folder's own sharing from its parent's.
+    inheritedFrom: driveItemReference,
+
+    shareId: s.string({ description: "Opaque sharing ID for this permission." }),
+    hasPassword: s.boolean({ description: "Whether a link permission is password protected." }),
+    expirationDateTime: s.string({ description: "When this permission expires, if it does." }),
+  },
+  { description: "OneDrive permission resource." },
+);
+const listPermissionsOutput = s.object(
+  {
+    items: s.array(permission, { description: "Permissions returned by Microsoft Graph." }),
+    nextLink: s.nullableString("Opaque nextLink for fetching the next page, if any."),
+  },
+  { required: ["items", "nextLink"], description: "OneDrive permission list response." },
+);
 const downloadOutput = s.requiredObject("A OneDrive file downloaded into local transit storage.", {
   fileId: nonEmptyString("The unique identifier of the downloaded OneDrive item."),
   name: nonEmptyString("The downloaded file name."),
@@ -169,6 +237,12 @@ const actions: OneDriveActionSource[] = [
     "Get metadata for a drive item by item ID or path.",
     input({ driveId, itemId, itemPath, select, expand }),
     driveItem,
+  ),
+  read(
+    "list_item_permissions",
+    "List the permissions on a OneDrive item, naming who may read or write it.",
+    input({ driveId, itemId, itemPath, top, nextLink }),
+    listPermissionsOutput,
   ),
   read(
     "list_folder_children",

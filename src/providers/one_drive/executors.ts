@@ -37,10 +37,21 @@ type OneDriveRequestInput = {
   headers?: Record<string, string>;
   body?: unknown;
   rawBody?: BodyInit;
-  absoluteUrlPolicy?: "children" | "search";
+  absoluteUrlPolicy?: OneDriveNextLinkPolicy;
   allowStatuses?: number[];
   signal?: AbortSignal;
 };
+
+/**
+ * Which paginated endpoint a `@odata.nextLink` is allowed to target.
+ *
+ * Named rather than spelled inline at each use: three signatures take it, and
+ * a value one of them accepts while another does not is a link that passes the
+ * request builder and is refused by the assertion, or worse the other way
+ * round. A new paginated action adds one member here and one arm in
+ * `assertAllowedOneDriveNextLink`.
+ */
+type OneDriveNextLinkPolicy = "children" | "search" | "permissions";
 
 type OneDriveGraphCollection<T> = {
   value?: T;
@@ -82,6 +93,9 @@ export const oneDriveActionHandlers: ProviderActionHandlers<"one_drive", OneDriv
   },
   list_folder_children(input, deps) {
     return listFolderChildren(input, deps);
+  },
+  list_item_permissions(input, deps) {
+    return listItemPermissions(input, deps);
   },
   search_items(input, deps) {
     return searchItems(input, deps);
@@ -196,7 +210,7 @@ async function oneDriveRequest(pathOrUrl: string, input: OneDriveRequestInput) {
 function buildOneDriveUrl(
   pathOrUrl: string,
   query?: Record<string, string | undefined>,
-  absoluteUrlPolicy?: "children" | "search",
+  absoluteUrlPolicy?: OneDriveNextLinkPolicy,
 ) {
   const isAbsolutePath = isAbsoluteUrl(pathOrUrl);
   const target = isAbsolutePath ? new URL(pathOrUrl) : new URL(pathOrUrl, `${graphBaseUrl}/`);
@@ -222,12 +236,15 @@ function buildOneDriveUrl(
   return target;
 }
 
-function assertAllowedOneDriveNextLink(target: URL, absoluteUrlPolicy?: "children" | "search") {
+function assertAllowedOneDriveNextLink(target: URL, absoluteUrlPolicy?: OneDriveNextLinkPolicy) {
   if (absoluteUrlPolicy === "children" && !isAllowedChildrenNextLinkPath(target.pathname)) {
     throw new ProviderRequestError(400, "nextLink must target OneDrive children pagination endpoints");
   }
   if (absoluteUrlPolicy === "search" && !isAllowedSearchNextLinkPath(target.pathname)) {
     throw new ProviderRequestError(400, "nextLink must target OneDrive search pagination endpoints");
+  }
+  if (absoluteUrlPolicy === "permissions" && !isAllowedPermissionsNextLinkPath(target.pathname)) {
+    throw new ProviderRequestError(400, "nextLink must target OneDrive permission pagination endpoints");
   }
 }
 
@@ -249,6 +266,30 @@ function isAllowedChildrenNextLinkPath(pathname: string) {
 function isAllowedSearchNextLinkPath(pathname: string) {
   const suffix = readDrivePathSuffix(pathname);
   return Boolean(suffix && suffix.startsWith("/root/search("));
+}
+
+/**
+ * Whether a `@odata.nextLink` may be followed while paging permissions.
+ *
+ * The same shape as the children arm, and narrow for the same reason: the link
+ * is a string Microsoft Graph put in a response body, and following it
+ * unchecked would let a response redirect this action at any other Graph
+ * endpoint the token can reach. A permission page is `/items/{id}/permissions`
+ * or `/root/permissions`, on this drive, and nothing else.
+ */
+function isAllowedPermissionsNextLinkPath(pathname: string) {
+  const suffix = readDrivePathSuffix(pathname);
+  if (!suffix) {
+    return false;
+  }
+  if (suffix === "/root/permissions") {
+    return true;
+  }
+  if (suffix.startsWith("/items/")) {
+    const segments = suffix.split("/").filter(Boolean);
+    return segments.length === 3 && segments[0] === "items" && segments[2] === "permissions";
+  }
+  return suffix.startsWith("/root:/") && suffix.endsWith(":/permissions");
 }
 
 function readDrivePathSuffix(pathname: string) {
@@ -413,6 +454,25 @@ async function listFolderChildren(input: Record<string, unknown>, deps: OneDrive
             $expand: formatOptionalStringArray(input.expand),
             $orderby: readOptionalString(input.orderBy),
           }),
+    }),
+  );
+
+  return {
+    items: readCollectionItems(payload.value),
+    nextLink: readNextLink(payload),
+  };
+}
+
+async function listItemPermissions(input: Record<string, unknown>, deps: OneDriveRuntimeDeps) {
+  const nextLink = readOptionalString(input.nextLink);
+  const path = nextLink ? nextLink : `${buildDriveItemPathFromInput(input)}/permissions`;
+
+  const payload = asObject(
+    await oneDriveJsonRequest<OneDriveGraphCollection<unknown[]>>(path, {
+      accessToken: deps.accessToken,
+      fetcher: deps.fetcher,
+      absoluteUrlPolicy: nextLink ? "permissions" : undefined,
+      query: nextLink ? undefined : compactObject({ $top: formatOptionalNumber(input.top) }),
     }),
   );
 
