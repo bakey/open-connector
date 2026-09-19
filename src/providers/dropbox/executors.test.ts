@@ -10,6 +10,7 @@ interface CapturedRequest {
   url: URL;
   authorization: string | null;
   apiArg: Record<string, unknown>;
+  rawApiArg: string | null;
 }
 
 const oauthCredential: Extract<ResolvedCredential, { authType: "oauth2" }> = {
@@ -200,6 +201,33 @@ describe("Dropbox transit downloads", () => {
   });
 });
 
+describe("Dropbox-API-Arg header encoding", () => {
+  it("escapes a non-ASCII path so the header stays inside ByteString", async () => {
+    const content = new Uint8Array([1, 2, 3]);
+    const requests = stubResponses([
+      dropboxDownloadResponse(content, {
+        ".tag": "file",
+        id: "id:cjk-1",
+        // ASCII on purpose: this fixture rides the RESPONSE header, which is
+        // under the same ByteString limit. The request header is what is
+        // under test here.
+        name: "kkndme.pdf",
+        size: content.length,
+      }),
+    ]);
+    const { store } = createTransitFileStore(1024);
+
+    const result = await executeDropboxAction("download_file", { path: "/kkndme \u5929\u6daf.pdf" }, store);
+
+    expect(result).toMatchObject({ ok: true });
+    // Assert the RAW header, not the parsed object: JSON.parse decodes \uXXXX,
+    // so the parsed form is identical either way and cannot fail on a regression.
+    expect(requests[0]?.rawApiArg).toBe(String.raw`{"path":"/kkndme \u5929\u6daf.pdf"}`);
+    expect(requests[0]?.rawApiArg).toMatch(/^[\u0020-\u007e]*$/);
+    expect(requests[0]?.apiArg).toEqual({ path: "/kkndme \u5929\u6daf.pdf" });
+  });
+});
+
 function dropboxDownloadResponse(content: Uint8Array, metadata: Record<string, unknown>): Response {
   return new Response(Uint8Array.from(content), {
     headers: {
@@ -217,6 +245,7 @@ function stubResponses(responses: Response[]): CapturedRequest[] {
       url: new URL(request.url),
       authorization: request.headers.get("authorization"),
       apiArg: JSON.parse(request.headers.get("dropbox-api-arg") ?? "{}") as Record<string, unknown>,
+      rawApiArg: request.headers.get("dropbox-api-arg"),
     });
     const response = responses.shift();
     if (!response) {
