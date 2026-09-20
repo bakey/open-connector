@@ -24,6 +24,34 @@ describe("Feishu provider definition", () => {
     expect(action("list_drive_permissions").providerPermissions).toEqual(["docs:permission.member:retrieve"]);
   });
 
+  // `permissionResourceSchema` used to pass `optional: []`, and an empty
+  // array is truthy for `s.object`, so `fields` and `permType` were required
+  // and a caller that supplied only the resource was rejected before the
+  // request was even built.
+  it("requires only the resource for the permission actions", () => {
+    expect(action("list_drive_permissions").inputSchema.required).toEqual(["token", "resourceType"]);
+    expect(action("add_drive_permission").inputSchema.required).toEqual([
+      "token",
+      "resourceType",
+      "memberId",
+      "memberType",
+      "permission",
+    ]);
+    expect(action("update_drive_permission").inputSchema.required).toEqual([
+      "token",
+      "resourceType",
+      "memberId",
+      "memberType",
+      "permission",
+    ]);
+    expect(action("remove_drive_permission").inputSchema.required).toEqual([
+      "token",
+      "resourceType",
+      "memberId",
+      "memberType",
+    ]);
+  });
+
   it("requests the provider-enforced wiki-node read permission", () => {
     expect(action("get_wiki_node").requiredScopes).toEqual(["wiki:node:read"]);
     expect(action("get_wiki_node").providerPermissions).toEqual(["wiki:node:read"]);
