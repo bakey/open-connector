@@ -249,11 +249,14 @@ function grantOwner(metadata: Record<string, unknown>): { id: string; name: stri
 function notionGetCurrentUser(metadata: Record<string, unknown>) {
   const workspaceId = asNonEmptyString(metadata.workspace_id);
   if (!workspaceId) {
+    // No explicit code: `providerErrorCodes` is the vocabulary a provider may
+    // put on the wire, and a missing credential field is not in it. The
+    // convention this follows is `provider-runtime.ts`'s own
+    // "credential metadata is missing …" — a plain 400 — with a message that
+    // says which field and what to do instead of only naming it.
     throw new ProviderRequestError(
       400,
       "the stored Notion credential names no workspace_id — only an OAuth grant carries one; reconnect Notion with an OAuth app",
-      undefined,
-      "invalid_credential_metadata",
     );
   }
   const owner = grantOwner(metadata);

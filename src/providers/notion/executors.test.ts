@@ -89,7 +89,7 @@ describe("notion.get_current_user", () => {
     const result = await executors["notion.get_current_user"]!({}, contextFor(internalIntegration()));
     expect(result).toMatchObject({
       ok: false,
-      error: { code: "invalid_credential_metadata", message: expect.stringContaining("workspace_id") },
+      error: { message: expect.stringContaining("workspace_id") },
     });
   });
 });
