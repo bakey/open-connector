@@ -42,15 +42,7 @@ type OneDriveRequestInput = {
   signal?: AbortSignal;
 };
 
-/**
- * Which paginated endpoint a `@odata.nextLink` is allowed to target.
- *
- * Named rather than spelled inline at each use: three signatures take it, and
- * a value one of them accepts while another does not is a link that passes the
- * request builder and is refused by the assertion, or worse the other way
- * round. A new paginated action adds one member here and one arm in
- * `assertAllowedOneDriveNextLink`.
- */
+/** Which paginated endpoint a caller-supplied `@odata.nextLink` is allowed to target. */
 type OneDriveNextLinkPolicy = "children" | "search" | "permissions";
 
 type OneDriveGraphCollection<T> = {
@@ -268,15 +260,6 @@ function isAllowedSearchNextLinkPath(pathname: string) {
   return Boolean(suffix && suffix.startsWith("/root/search("));
 }
 
-/**
- * Whether a `@odata.nextLink` may be followed while paging permissions.
- *
- * The same shape as the children arm, and narrow for the same reason: the link
- * is a string Microsoft Graph put in a response body, and following it
- * unchecked would let a response redirect this action at any other Graph
- * endpoint the token can reach. A permission page is `/items/{id}/permissions`
- * or `/root/permissions`, on this drive, and nothing else.
- */
 function isAllowedPermissionsNextLinkPath(pathname: string) {
   const suffix = readDrivePathSuffix(pathname);
   if (!suffix) {
@@ -472,7 +455,7 @@ async function listItemPermissions(input: Record<string, unknown>, deps: OneDriv
       accessToken: deps.accessToken,
       fetcher: deps.fetcher,
       absoluteUrlPolicy: nextLink ? "permissions" : undefined,
-      query: nextLink ? undefined : compactObject({ $top: formatOptionalNumber(input.top) }),
+      query: nextLink ? undefined : compactObject({ $select: formatOptionalStringArray(input.select) }),
     }),
   );
 

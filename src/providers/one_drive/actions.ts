@@ -37,16 +37,9 @@ const identity = s.looseObject(
   {
     id: s.string({ description: "Unique identifier for the identity." }),
     displayName: s.string({ description: "Display name for the identity." }),
-    // Measured on a real personal drive, and named here because a consumer
-    // cannot key on a field the published catalog never mentions. `id` is not
-    // the stable one: under `siteUser` it was `"4"`, a SharePoint site-local
-    // index, while the same person's `createdBy.user.id` on the same drive was
-    // a 16-hex CID. The EMAIL was the only identifier that matched anywhere
-    // else.
-    //
-    // Neither is required — `looseObject` emits no `required` list — so this
-    // says "may appear", which is exactly what was observed: present under
-    // `siteUser` and `user`, absent elsewhere.
+    // Not in the documented identity resource, but sharing responses carry them.
+    // Under `siteUser` the `id` is a SharePoint site-local index, so `email` is
+    // the only identifier that matches the same person elsewhere.
     email: s.string({ description: "Email address for the identity, when Graph supplies one." }),
     loginName: s.string({
       description: "SharePoint claims login name for the identity, when Graph supplies one.",
@@ -70,11 +63,6 @@ const driveItemReference = s.looseObject(
     path: s.string({ description: "Percent-encoded path of the referenced item." }),
     driveType: s.string({ description: "Drive type of the referenced item." }),
     siteId: s.string({ description: "Site ID of the referenced item." }),
-    // Richer than the documented `itemReference`, measured inside a
-    // permission's `inheritedFrom` on a personal drive. Both arrived and
-    // neither was named, so they reached a caller only by surviving the
-    // verbatim return — invisible to anything generating types from the
-    // catalog.
     shareId: s.string({ description: "Sharing ID of the referenced item, when Graph supplies one." }),
     sharepointIds: rawObject,
   },
@@ -171,11 +159,8 @@ const permission = s.looseObject(
     roles: s.array(s.string({ description: "A role this permission grants." }), {
       description: "Roles the permission grants, such as read, write, or owner.",
     }),
-    // Both spellings, deliberately. `grantedToV2` is the current field and is
-    // what a work or school drive answers with; a personal OneDrive still
-    // answers with the deprecated `grantedTo` and omits V2 entirely, so a
-    // caller that reads only one of them sees an unattributed grant on half
-    // the drives Microsoft sells.
+    // Both spellings are declared: `grantedTo` is deprecated but still sent, and
+    // the two do not always carry the same members (`user` vs `siteUser`).
     grantedTo: identitySet,
     grantedToV2: sharePointIdentitySet,
     grantedToIdentities: s.array(identitySet, {
@@ -186,12 +171,8 @@ const permission = s.looseObject(
     }),
     link: sharingLink,
     invitation: sharingInvitation,
-    // Personal drives only. Present means the permission is inherited from an
-    // ancestor rather than set on this item, which is the difference between
-    // "shared here" and "shared above"; a consumer that ignores it cannot
-    // tell a folder's own sharing from its parent's.
+    // Present only when the permission is inherited from an ancestor.
     inheritedFrom: driveItemReference,
-
     shareId: s.string({ description: "Opaque sharing ID for this permission." }),
     hasPassword: s.boolean({ description: "Whether a link permission is password protected." }),
     expirationDateTime: s.string({ description: "When this permission expires, if it does." }),
@@ -262,7 +243,7 @@ const actions: OneDriveActionSource[] = [
   read(
     "list_item_permissions",
     "List the permissions on a OneDrive item, naming who may read or write it.",
-    input({ driveId, itemId, itemPath, top, nextLink }),
+    input({ driveId, itemId, itemPath, select, nextLink }),
     listPermissionsOutput,
   ),
   read(
