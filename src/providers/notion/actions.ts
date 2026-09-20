@@ -176,15 +176,20 @@ const pageParent = s.oneOf(
  * and a declared schema is what lets a consumer's fingerprint of this action
  * catch an upstream rename at registration instead of at scan time.
  *
- * **Declaring it may not silently narrow it.** `s.object` sets
- * `additionalProperties: false`, and this action shipped with the provider —
- * SDK and CLI callers already read the fields Notion's own body carries. So
- * Notion's fields keep NOTION'S names and are forwarded unchanged, and the
- * two fields this action adds are additive. An earlier revision of this
- * schema renamed `unknown_block_ids` to `unknownBlockIds` and dropped
- * `object`/`id`, which would have broken every existing caller on upgrade for
- * no gain: a consumer mapping columns can read a snake_case key as easily as
- * a camelCase one.
+ * **Declaring it may not silently narrow it.** This action shipped with the
+ * provider — SDK and CLI callers already read the fields Notion's own body
+ * carries. So Notion's fields keep NOTION'S names and are forwarded
+ * unchanged, and the two fields this action adds are additive. An earlier
+ * revision of this schema renamed `unknown_block_ids` to `unknownBlockIds`
+ * and dropped `object`/`id`, which would have broken every existing caller on
+ * upgrade for no gain: a consumer mapping columns can read a snake_case key
+ * as easily as a camelCase one.
+ *
+ * `additionalProperties: true`, not the `s.object` default: the executor
+ * forwards Notion's body with a spread, so keys Notion adds beside the
+ * declared ones (`request_id` today, whatever comes next) stay on the wire,
+ * and a schema that closed the object would fail validation against the very
+ * body it describes.
  */
 const notionPageMarkdownSchema = s.object(
   {
@@ -219,15 +224,17 @@ const notionPageMarkdownSchema = s.object(
   },
   {
     required: ["markdown", "truncated", "unknown_block_ids", "pageId", "lastEditedTime"],
+    additionalProperties: true,
     description: "A Notion page rendered as Markdown, with its revision and how complete the render was.",
   },
 );
 
 /**
- * `get_current_user`'s output. Read off the OAuth grant, never off
- * `GET /users/me`: under an OAuth token that endpoint describes the BOT and
- * names the workspace only by `workspace_name`, never by `workspace_id`, and
- * `workspace_id` is the value everything downstream keys on.
+ * `get_current_user`'s output. Read off what is stored with the credential,
+ * never by calling `GET /users/me` at action time: that endpoint describes
+ * the BOT, and the workspace id and owning user it does carry (under `bot`)
+ * were already recorded by the validator, next to the OAuth grant's own
+ * `workspace_id` and `owner`.
  */
 const notionCurrentUserSchema = s.object(
   {
@@ -267,7 +274,7 @@ export const notionActions: ActionDefinition[] = [
     name: "get_current_user",
     operationType: "read",
     description:
-      "The workspace and owning user of the connected Notion credential, read from the OAuth grant it was created with. Makes no API call, and refuses a credential whose grant names no workspace — an internal-integration secret cannot.",
+      "The workspace and owning user of the connected Notion credential, read from what was stored with it: the OAuth grant, or the bot object recorded when the credential was validated. Makes no API call. An internal integration answers with its workspace and no user.",
     requiredScopes: [],
     inputSchema: s.object({}),
     outputSchema: notionCurrentUserSchema,

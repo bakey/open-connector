@@ -41,9 +41,10 @@ interface NotionActionContext {
   /**
    * The stored credential's runtime metadata. For an OAuth credential this is
    * the token-exchange response minus its secrets — `workspace_id`, `owner`,
-   * `bot_id`, `workspace_name` — which is where Notion states who authorized
-   * a grant and in which workspace. No endpoint answers that afterwards, so
-   * `get_current_user` reads it here.
+   * `bot_id`, `workspace_name` — merged with the `/users/me` bot object the
+   * validator stored, whose `bot` carries `workspace_id`, `owner` and
+   * `workspace_name` as well. For an internal integration only the latter
+   * exists. `get_current_user` reads both here and makes no request.
    */
   metadata: Record<string, unknown>;
 }
@@ -223,12 +224,14 @@ function bearerTokenOf(credential: ResolvedCredential | undefined): string {
 }
 
 /**
- * The person named on the OAuth grant, or `undefined` for a grant that names
- * none (an internal-integration secret; a grant whose `owner.type` is
- * `workspace`).
+ * The person named as the credential's owner, or `undefined` when none is
+ * (a grant whose `owner.type` is `workspace`, which is every internal
+ * integration). Notion states the owner twice: at the top level of the token
+ * exchange, and under `bot.owner` of the `/users/me` bot object the validator
+ * stored. The exchange is read first, the bot object when it is absent.
  */
 function grantOwner(metadata: Record<string, unknown>): { id: string; name: string | undefined } | undefined {
-  const owner = asObject(metadata.owner);
+  const owner = asObject(metadata.owner) ?? asObject(asObject(metadata.bot)?.owner);
   if (owner?.type !== "user") {
     return undefined;
   }
@@ -238,16 +241,19 @@ function grantOwner(metadata: Record<string, unknown>): { id: string; name: stri
 }
 
 /**
- * `get_current_user`: the workspace and owner of the grant, and nothing else.
+ * `get_current_user`: the workspace and owner of the credential, and nothing
+ * else, read from what is already stored with it.
  *
- * Refuses rather than guesses when the grant names no workspace. That is the
- * internal-integration case, and it is a real limit rather than a missing
- * field: Notion exposes a workspace id ONLY in the OAuth token exchange, so
- * a pasted secret can never answer this and a consumer that keys on the
- * workspace id cannot be built on one.
+ * The workspace id has two sources and neither costs a request: the OAuth
+ * token exchange names it as `workspace_id`, and the `/users/me` bot object
+ * the validator stored names it as `bot.workspace_id` for OAuth grants and
+ * internal integrations alike. Refuses rather than guesses when neither is
+ * present, which means the credential was stored without its bot object and
+ * needs to be validated again.
  */
 function notionGetCurrentUser(metadata: Record<string, unknown>) {
-  const workspaceId = asNonEmptyString(metadata.workspace_id);
+  const bot = asObject(metadata.bot);
+  const workspaceId = asNonEmptyString(metadata.workspace_id) ?? asNonEmptyString(bot?.workspace_id);
   if (!workspaceId) {
     // No explicit code: `providerErrorCodes` is the vocabulary a provider may
     // put on the wire, and a missing credential field is not in it. The
@@ -256,13 +262,13 @@ function notionGetCurrentUser(metadata: Record<string, unknown>) {
     // says which field and what to do instead of only naming it.
     throw new ProviderRequestError(
       400,
-      "the stored Notion credential names no workspace_id — only an OAuth grant carries one; reconnect Notion with an OAuth app",
+      "the stored Notion credential carries no workspace_id; reconnect Notion so its bot object is stored with the credential",
     );
   }
   const owner = grantOwner(metadata);
   return {
     workspaceId,
-    workspaceName: asNonEmptyString(metadata.workspace_name) ?? null,
+    workspaceName: asNonEmptyString(metadata.workspace_name) ?? asNonEmptyString(bot?.workspace_name) ?? null,
     userId: owner?.id ?? null,
     userName: owner?.name ?? null,
     isBot: owner === undefined,
@@ -368,13 +374,19 @@ async function notionLastEditedTime(id: string, accessToken: string, fetcher: ty
       throw error;
     }
 
+    // A successful answer settles which kind of id this is. Only a 404 falls
+    // through, so an object Notion returned without a revision is malformed
+    // rather than a reason to consult the other endpoint.
     const lastEditedTime = asNonEmptyString(object.last_edited_time);
-    if (lastEditedTime) {
-      return lastEditedTime;
+    if (!lastEditedTime) {
+      throw new ProviderRequestError(502, `Notion returned ${id} without a last_edited_time`);
     }
+    return lastEditedTime;
   }
 
-  throw new ProviderRequestError(502, `Notion returned ${id} without a last_edited_time`);
+  // Unreachable: the block attempt either returns, rethrows its own 404, or
+  // throws the 502 above. Kept so the bounded loop has an explicit tail.
+  throw new ProviderRequestError(502, `Notion answered neither /pages nor /blocks for ${id}`);
 }
 
 /**

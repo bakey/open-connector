@@ -32,15 +32,15 @@ function userGrant(): Record<string, unknown> {
   };
 }
 
-function internalIntegration(): ApiKeyCredential {
+/** A pasted internal-integration secret, with what the validator stored: the
+ *  `/users/me` bot object, whose `bot` names the workspace and its owner. */
+function internalIntegration(metadata: Record<string, unknown>): ApiKeyCredential {
   return {
     authType: "api_key",
     apiKey: "secret_pasted",
     values: { apiKey: "secret_pasted" },
     profile: { accountId: BOT, displayName: "Skardi", grantedScopes: [] },
-    // What the validator stored: the `/users/me` bot object. No workspace id
-    // exists anywhere for this credential kind.
-    metadata: { object: "user", id: BOT, type: "bot", bot: { workspace_name: "Skardi" } },
+    metadata,
   };
 }
 
@@ -85,8 +85,42 @@ describe("notion.get_current_user", () => {
     });
   });
 
-  it("refuses a credential whose grant names no workspace — an internal integration cannot", async () => {
-    const result = await executors["notion.get_current_user"]!({}, contextFor(internalIntegration()));
+  it("answers an internal integration from the stored bot object: its workspace, and no user", async () => {
+    const result = await executors["notion.get_current_user"]!(
+      {},
+      contextFor(
+        internalIntegration({
+          object: "user",
+          id: BOT,
+          type: "bot",
+          bot: { owner: { type: "workspace", workspace: true }, workspace_name: "Skardi", workspace_id: WORKSPACE },
+        }),
+      ),
+    );
+    expect(result).toEqual({
+      ok: true,
+      output: { workspaceId: WORKSPACE, workspaceName: "Skardi", userId: null, userName: null, isBot: true },
+    });
+  });
+
+  it("reads the bot object's owner when the grant itself does not name one", async () => {
+    const result = await executors["notion.get_current_user"]!(
+      {},
+      contextFor(
+        grant({
+          workspace_id: WORKSPACE,
+          bot: { owner: { type: "user", user: { object: "user", id: ALICE, name: "Alice Example" } } },
+        }),
+      ),
+    );
+    expect(result).toMatchObject({ ok: true, output: { userId: ALICE, userName: "Alice Example", isBot: false } });
+  });
+
+  it("refuses a credential stored without any workspace id rather than guessing one", async () => {
+    const result = await executors["notion.get_current_user"]!(
+      {},
+      contextFor(internalIntegration({ object: "user", id: BOT, type: "bot", bot: { workspace_name: "Skardi" } })),
+    );
     expect(result).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("workspace_id") },
@@ -180,9 +214,14 @@ describe("notion.retrieve_page_markdown", () => {
     expect(calls[1]!.url).toBe(`https://api.notion.com/v1/pages/${PAGE}/markdown?include_transcript=true`);
   });
 
-  it("refuses a page object with no revision rather than inventing one", async () => {
-    const { result } = await run({ object: "page", id: PAGE }, { object: "page_markdown", id: PAGE, markdown: "x" });
+  it("refuses a page object with no revision rather than inventing one or consulting /blocks", async () => {
+    const { result, calls } = await run(
+      { object: "page", id: PAGE },
+      { object: "page_markdown", id: PAGE, markdown: "x" },
+    );
     expect(result).toMatchObject({ ok: false, error: { code: "provider_error" } });
+    // A successful page answer settles the kind of id; only a 404 falls through.
+    expect(calls.map((c) => c.url)).toEqual([`https://api.notion.com/v1/pages/${PAGE}`]);
   });
 
   it("answers an id this grant cannot reach before attempting the render", async () => {
