@@ -109,7 +109,7 @@ describe("Slack authorization paths", () => {
       fetcher: async (url, init) => {
         expect(url.toString()).toBe("https://slack.com/api/auth.test");
         expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${accessToken}`);
-        return Response.json({ ok: true, team: "Example workspace", user_id: "U123" });
+        return Response.json({ ok: true, team: "Example workspace", team_id: "T123", user_id: "U123" });
       },
     });
 
@@ -878,5 +878,114 @@ describe("Slack discovery rate limit details", () => {
       ok: false,
       error: { code: "rate_limited", details: { status: 429, details: { retryAfterSeconds: 73 } } },
     });
+  });
+});
+
+describe("Slack credential validators require an auth.test identity", () => {
+  const anonymousPayloads = [{ ok: true }, { ok: true, team: "Example workspace" }, { ok: true, team_id: "T123" }];
+
+  it("apiKey rejects a successful auth.test that names no user", async () => {
+    for (const payload of anonymousPayloads) {
+      await expect(
+        credentialValidators.apiKey!(apiKeyCredential("xoxb-bot-token"), {
+          fetcher: async () => Response.json(payload),
+        }),
+      ).rejects.toMatchObject({ status: 502 });
+    }
+  });
+
+  it("oauth2 rejects a successful auth.test that names no user", async () => {
+    for (const payload of anonymousPayloads) {
+      await expect(
+        credentialValidators.oauth2!(oauthCredential("user"), { fetcher: async () => Response.json(payload) }),
+      ).rejects.toMatchObject({ status: 502 });
+    }
+  });
+
+  it("falls back to the workspace ID as displayName when auth.test omits the team name", async () => {
+    await expect(
+      credentialValidators.apiKey!(apiKeyCredential("xoxb-bot-token"), {
+        fetcher: async () => Response.json({ ok: true, team_id: "T123", user_id: "U123" }),
+      }),
+    ).resolves.toMatchObject({ profile: { accountId: "U123", displayName: "T123" } });
+  });
+});
+
+describe("Slack message and member page validation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const context: ExecutionContext = { getCredential: async () => apiKeyCredential("xoxb-bot-token") };
+  const membersPage = {
+    actionId: "slack.conversations_members",
+    execute: slackExecutors["slack.conversations_members"]!,
+    input: { channelId: "C024BE91L" },
+    list: "members",
+  };
+  const messagePages = [
+    {
+      actionId: "slack.get_channel_messages",
+      execute: slackExecutors["slack.get_channel_messages"]!,
+      input: { channelId: "C024BE91L" },
+      list: "messages",
+    },
+    {
+      actionId: "slack.get_thread",
+      execute: slackExecutors["slack.get_thread"]!,
+      input: { channelId: "C024BE91L", threadTs: "1700000000.000100" },
+      list: "messages",
+    },
+  ];
+  const pages = [...messagePages, membersPage];
+
+  async function expectInvalidPage(page: (typeof pages)[number], payload: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json(payload)),
+    );
+    const result = await page.execute(page.input, context);
+    expect(result).toMatchObject({ ok: false, error: { code: "provider_error", details: { status: 502 } } });
+    expect(result).not.toHaveProperty("output");
+  }
+
+  it.each(pages)("$actionId rejects a page whose list is missing or not an array", async (page) => {
+    for (const value of [undefined, null, {}, "row", 0]) {
+      await expectInvalidPage(page, { ok: true, [page.list]: value });
+    }
+  });
+
+  it.each(pages)("$actionId rejects a present next_cursor that is not a plain string", async (page) => {
+    for (const cursor of [0, false, [], {}, " ", " next", "next "]) {
+      await expectInvalidPage(page, { ok: true, [page.list]: [], response_metadata: { next_cursor: cursor } });
+    }
+    await expectInvalidPage(page, { ok: true, [page.list]: [], response_metadata: "metadata" });
+  });
+
+  it.each(messagePages)("$actionId rejects a message row that is not an object or has no ts", async (page) => {
+    for (const row of [null, "message", 1, {}, { ts: "" }, { ts: 1700000000 }]) {
+      await expectInvalidPage(page, { ok: true, messages: [{ ts: "1700000000.000001" }, row] });
+    }
+    await expectInvalidPage(page, { ok: true, messages: [], has_more: "true" });
+  });
+
+  it.each([null, "", " ", " U1", 7, {}])("conversations_members rejects a malformed member ID %j", async (member) => {
+    await expectInvalidPage(membersPage, { ok: true, members: ["U023BECGF", member] });
+  });
+
+  it.each(pages)("$actionId treats an absent, null or empty next_cursor as the last page", async (page) => {
+    for (const fields of [
+      {},
+      { response_metadata: {} },
+      { response_metadata: { next_cursor: "" } },
+      { response_metadata: { next_cursor: null } },
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json({ ok: true, [page.list]: [], ...fields })),
+      );
+      await expect(page.execute(page.input, context)).resolves.toMatchObject({
+        ok: true,
+        output: { nextCursor: "" },
+      });
+    }
   });
 });

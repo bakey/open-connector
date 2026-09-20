@@ -168,50 +168,22 @@ export const slackActionHandlers: ProviderActionHandlers<"slack", SlackActionHan
 
 export const slackCredentialValidators: CredentialValidators = {
   async apiKey(input, { fetcher, signal }) {
-    const payload = await slackRequestJson<{
-      ok: boolean;
-      team?: string;
-      team_id?: string;
-      user_id?: string;
-      error?: string;
-    }>({
-      accessToken: input.apiKey,
-      fetcher,
-      signal,
-      method: "auth.test",
-    });
+    const payload = await slackAuthTest({ accessToken: input.apiKey, fetcher, signal });
 
     return {
-      profile: {
-        accountId: payload.user_id ?? payload.team_id ?? "slack:api_key",
-        displayName: payload.team ?? payload.team_id ?? payload.user_id ?? "Slack Workspace",
-      },
+      profile: slackCredentialProfile(payload),
       metadata: {
         currentAccount: payload,
       },
     };
   },
   async oauth2(input, { fetcher, signal }) {
-    const payload = await slackRequestJson<{
-      ok: boolean;
-      team?: string;
-      team_id?: string;
-      user_id?: string;
-      error?: string;
-    }>({
-      accessToken: input.accessToken,
-      fetcher,
-      signal,
-      method: "auth.test",
-    });
+    const payload = await slackAuthTest({ accessToken: input.accessToken, fetcher, signal });
 
     const responseScopes = readSlackCredentialScopes(input.accessToken, input.metadata);
 
     return {
-      profile: {
-        accountId: payload.user_id ?? payload.team_id ?? "slack:oauth2",
-        displayName: payload.team ?? payload.team_id ?? payload.user_id ?? "Slack Workspace",
-      },
+      profile: slackCredentialProfile(payload),
       grantedScopes: responseScopes.length > 0 ? responseScopes : input.profile.grantedScopes,
       metadata: {
         currentAccount: payload,
@@ -220,30 +192,49 @@ export const slackCredentialValidators: CredentialValidators = {
   },
 };
 
-async function slackGetCurrentUser(context: SlackActionContext): Promise<unknown> {
-  const payload = await slackRequestJson<
-    SlackPayloadError & {
-      team_id?: unknown;
-      user_id?: unknown;
-      bot_id?: unknown;
-    }
-  >({ ...context, method: "auth.test" });
+interface SlackAuthTestPayload extends SlackPayloadError {
+  team?: unknown;
+  team_id?: unknown;
+  user_id?: unknown;
+  bot_id?: unknown;
+}
 
-  if (payload.ok !== true) {
-    throw slackResponseError("auth.test ok");
-  }
-  // Identity is upstream data, not a token-prefix or cached profile inference.
-  // Refuse whitespace normalization so malformed identity never becomes a key.
-  for (const field of ["team_id", "user_id", "bot_id"] as const) {
-    const value = payload[field];
-    if (field === "bot_id" && value === undefined) {
-      continue;
-    }
-    if (typeof value !== "string" || !value || value.trim() !== value) {
-      throw slackResponseError(`auth.test ${field}`);
-    }
-  }
-  return { teamId: payload.team_id, userId: payload.user_id, isBot: payload.bot_id !== undefined };
+interface SlackAuthTestIdentity {
+  teamId: string;
+  userId: string;
+  botId: string | undefined;
+}
+
+async function slackAuthTest(input: Omit<SlackRequestJsonInput, "method" | "body">): Promise<SlackAuthTestPayload> {
+  return slackRequestJson<SlackAuthTestPayload>({ ...input, method: "auth.test" });
+}
+
+/**
+ * Read the identity `auth.test` reports for a token. Slack documents `team_id`
+ * and `user_id` on every successful response and `bot_id` only for bot tokens,
+ * so a response missing either required ID is malformed rather than anonymous:
+ * no fallback identity is manufactured for it, because a connection keyed on a
+ * placeholder cannot be told apart from another token in the same state.
+ */
+function readSlackAuthTestIdentity(payload: SlackAuthTestPayload): SlackAuthTestIdentity {
+  return {
+    teamId: requireSlackId(payload.team_id, "auth.test team_id"),
+    userId: requireSlackId(payload.user_id, "auth.test user_id"),
+    botId: payload.bot_id === undefined ? undefined : requireSlackId(payload.bot_id, "auth.test bot_id"),
+  };
+}
+
+function slackCredentialProfile(payload: SlackAuthTestPayload): { accountId: string; displayName: string } {
+  const identity = readSlackAuthTestIdentity(payload);
+  return {
+    accountId: identity.userId,
+    displayName: optionalString(payload.team) ?? identity.teamId,
+  };
+}
+
+async function slackGetCurrentUser(context: SlackActionContext): Promise<unknown> {
+  const identity = readSlackAuthTestIdentity(await slackAuthTest(context));
+  return { teamId: identity.teamId, userId: identity.userId, isBot: identity.botId !== undefined };
 }
 
 async function slackListChannels(input: Record<string, unknown>, context: SlackActionContext): Promise<unknown> {
@@ -277,19 +268,7 @@ async function slackGetChannelMessages(input: Record<string, unknown>, context: 
   }
   applySlackHistoryWindow(url, input);
 
-  const payload = await slackGetJson<{
-    ok: boolean;
-    messages?: Array<Record<string, unknown>>;
-    has_more?: boolean;
-    response_metadata?: { next_cursor?: string };
-    error?: string;
-  }>(url, context);
-
-  return {
-    messages: (payload.messages ?? []).map((message) => normalizeSlackMessage(message)),
-    hasMore: payload.has_more ?? false,
-    nextCursor: payload.response_metadata?.next_cursor ?? "",
-  };
+  return readSlackMessagePage(await slackGetJson<SlackMessagePagePayload>(url, context), "conversations.history");
 }
 
 async function slackConversationsMembers(
@@ -305,16 +284,17 @@ async function slackConversationsMembers(
     url.searchParams.set("limit", String(input.limit));
   }
 
-  const payload = await slackGetJson<{
-    ok: boolean;
-    members?: string[];
-    response_metadata?: { next_cursor?: string };
-    error?: string;
-  }>(url, context);
+  const payload = await slackGetJson<
+    SlackPayloadError & {
+      members?: unknown;
+    }
+  >(url, context);
 
   return {
-    memberIds: payload.members ?? [],
-    nextCursor: payload.response_metadata?.next_cursor ?? "",
+    memberIds: requireSlackArray(payload.members, "conversations.members members").map((member) =>
+      requireSlackId(member, "conversations.members member"),
+    ),
+    nextCursor: readSlackNextCursor(payload, "conversations.members"),
   };
 }
 
@@ -458,19 +438,7 @@ async function slackGetThread(input: Record<string, unknown>, context: SlackActi
   }
   applySlackHistoryWindow(url, input);
 
-  const payload = await slackGetJson<{
-    ok: boolean;
-    messages?: Array<Record<string, unknown>>;
-    has_more?: boolean;
-    response_metadata?: { next_cursor?: string };
-    error?: string;
-  }>(url, context);
-
-  return {
-    messages: (payload.messages ?? []).map((message) => normalizeSlackMessage(message)),
-    hasMore: payload.has_more ?? false,
-    nextCursor: payload.response_metadata?.next_cursor ?? "",
-  };
+  return readSlackMessagePage(await slackGetJson<SlackMessagePagePayload>(url, context), "conversations.replies");
 }
 
 async function slackListConversations(input: Record<string, unknown>, context: SlackActionContext): Promise<unknown> {
@@ -487,31 +455,19 @@ async function slackListConversations(input: Record<string, unknown>, context: S
     url.searchParams.set("exclude_archived", String(input.excludeArchived));
   }
 
-  const payload = await slackGetJson<{
-    ok: boolean;
-    channels?: unknown;
-    response_metadata?: Record<string, unknown>;
-    error?: string;
-  }>(url, context);
+  const payload = await slackGetJson<
+    SlackPayloadError & {
+      channels?: unknown;
+    }
+  >(url, context);
 
   // Discovery may prune against this page. Never manufacture an empty list or
   // terminal cursor from an unreadable enumeration response.
-  if (!Array.isArray(payload.channels)) {
-    throw slackResponseError("conversations.list channels");
-  }
-  const metadata = optionalRecord(payload.response_metadata);
-  if (payload.response_metadata !== undefined && !metadata) {
-    throw slackResponseError("conversations.list response_metadata");
-  }
-  const cursor = metadata?.next_cursor;
-  // Slack documents absent, null and empty cursors as terminal. A present
-  // non-string or padded cursor is malformed, not evidence the walk finished.
-  if (cursor != null && (typeof cursor !== "string" || cursor.trim() !== cursor)) {
-    throw slackResponseError("conversations.list next_cursor");
-  }
   return {
-    conversations: payload.channels.map((channel) => normalizeListedConversation(channel)),
-    nextCursor: typeof cursor === "string" ? normalizeNextCursor(cursor) : null,
+    conversations: requireSlackArray(payload.channels, "conversations.list channels").map((channel) =>
+      normalizeListedConversation(channel),
+    ),
+    nextCursor: normalizeNextCursor(readSlackNextCursor(payload, "conversations.list")),
   };
 }
 
@@ -1048,9 +1004,10 @@ function normalizeScheduledPostAt(value: number | string | undefined, fallback: 
 
 function normalizeListedConversation(value: unknown): Record<string, unknown> {
   const channel = optionalRecord(value);
-  if (!channel || typeof channel.id !== "string" || !channel.id || channel.id.trim() !== channel.id) {
-    throw slackResponseError("conversations.list channel id");
+  if (!channel) {
+    throw slackResponseError("conversations.list channel");
   }
+  requireSlackId(channel.id, "conversations.list channel id");
   for (const field of ["is_im", "is_mpim", "is_private", "is_channel", "is_group"]) {
     if (channel[field] !== undefined && typeof channel[field] !== "boolean") {
       throw slackResponseError(`conversations.list ${field}`);
@@ -1133,6 +1090,70 @@ function applySlackHistoryWindow(url: URL, input: Record<string, unknown>): void
   if (input.inclusive != null) {
     url.searchParams.set("inclusive", String(input.inclusive));
   }
+}
+
+interface SlackMessagePagePayload extends SlackPayloadError {
+  messages?: unknown;
+  has_more?: unknown;
+}
+
+/**
+ * Read one `conversations.history` / `conversations.replies` page. A page whose
+ * list is missing or whose rows are not objects is rejected rather than
+ * flattened into an empty result, so a broken upstream response cannot pass
+ * for the documented end of a walk.
+ */
+function readSlackMessagePage(payload: SlackMessagePagePayload, method: string): Record<string, unknown> {
+  if (payload.has_more !== undefined && typeof payload.has_more !== "boolean") {
+    throw slackResponseError(`${method} has_more`);
+  }
+  return {
+    messages: requireSlackArray(payload.messages, `${method} messages`).map((message) => {
+      const record = optionalRecord(message);
+      if (!record) {
+        throw slackResponseError(`${method} message`);
+      }
+      return normalizeSlackMessage(record);
+    }),
+    hasMore: payload.has_more ?? false,
+    nextCursor: readSlackNextCursor(payload, method),
+  };
+}
+
+/**
+ * Read a page's `response_metadata.next_cursor`. Slack documents an absent,
+ * null or empty cursor as the last page, so those all read as `""`; a present
+ * cursor that is not a plain string is malformed, not evidence the walk ended.
+ */
+function readSlackNextCursor(payload: SlackPayloadError, method: string): string {
+  const metadata = optionalRecord(payload.response_metadata);
+  if (payload.response_metadata !== undefined && !metadata) {
+    throw slackResponseError(`${method} response_metadata`);
+  }
+  const cursor = metadata?.next_cursor;
+  if (cursor == null || cursor === "") {
+    return "";
+  }
+  return requireSlackId(cursor, `${method} next_cursor`);
+}
+
+function requireSlackArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw slackResponseError(label);
+  }
+  return value;
+}
+
+/**
+ * Require an upstream identifier exactly as Slack sent it. Whitespace is not
+ * normalized away: a padded or blank ID is a malformed response, and trimming
+ * it would let the wrong key reach a caller.
+ */
+function requireSlackId(value: unknown, label: string): string {
+  if (typeof value !== "string" || value === "" || value.trim() !== value) {
+    throw slackResponseError(label);
+  }
+  return value;
 }
 
 /**

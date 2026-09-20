@@ -177,10 +177,10 @@ export const provider: ProviderDefinition = {
     },
     {
       type: "api_key",
-      label: "Bot token",
-      placeholder: "xoxb-...",
+      label: "Access token",
+      placeholder: "xoxb-... or xoxp-...",
       description:
-        "Slack bot or user token used with the Authorization Bearer header. Create a Slack app, install it to the workspace, then copy the bot token from OAuth & Permissions.",
+        "Slack bot or user token used with the Authorization Bearer header. Create a Slack app, install it to the workspace, then copy the bot token or user token from OAuth & Permissions.",
     },
   ],
   homepageUrl: "https://slack.com",

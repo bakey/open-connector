@@ -29,11 +29,11 @@ const conversationTypeSchema = s.stringEnum([...slackConversationTypes], {
 const historyWindowProperties = {
   oldest: s.string({
     description:
-      "Only return messages at or after this Slack timestamp, for example '1700000000.123456'. Slack omits the message at exactly this timestamp unless inclusive is true.",
+      "Only return messages after this Slack timestamp, for example '1700000000.123456'. The message at exactly this timestamp is included only when inclusive is true.",
   }),
   latest: s.string({
     description:
-      "Only return messages at or before this Slack timestamp. Defaults to now. Slack omits the message at exactly this timestamp unless inclusive is true.",
+      "Only return messages before this Slack timestamp. Defaults to now. The message at exactly this timestamp is included only when inclusive is true.",
   }),
   inclusive: s.boolean({
     description:
