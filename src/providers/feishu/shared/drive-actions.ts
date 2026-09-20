@@ -4,6 +4,7 @@ import { s } from "../../../core/json-schema.ts";
 import { defineProviderAction } from "../../../core/provider-definition.ts";
 export const feishuDriveProviderScopes = {
   metadataRead: "drive:drive.metadata:readonly",
+  folderList: "space:document:retrieve",
   search: "search:docs:read",
   folderCreate: "space:folder:create",
   copy: "docs:document:copy",
@@ -14,7 +15,7 @@ export const feishuDriveProviderScopes = {
   commentCreate: "docs:document.comment:create",
   commentUpdate: "docs:document.comment:update",
   commentDelete: "docs:document.comment:delete",
-  permissionRead: "docs:permission.member:readonly",
+  permissionRead: "docs:permission.member:retrieve",
   permissionCreate: "docs:permission.member:create",
   permissionUpdate: "docs:permission.member:update",
   permissionDelete: "docs:permission.member:delete",
@@ -181,8 +182,11 @@ export function createFeishuDriveActions(service: string): readonly ActionDefini
       name: "list_drive_files",
       operationType: "read",
       description: "List files, folders, and online documents inside a Feishu Drive folder.",
-      requiredScopes: [feishuDriveProviderScopes.metadataRead],
-      providerPermissions: [feishuDriveProviderScopes.metadataRead],
+      // Measured against Feishu with a user_access_token on 2026-09-14:
+      // metadataRead is rejected with 99991679, which names folderList as the
+      // narrowest accepted permission for this endpoint.
+      requiredScopes: [feishuDriveProviderScopes.folderList],
+      providerPermissions: [feishuDriveProviderScopes.folderList],
       inputSchema: s.object(
         "Choose a folder, sort order, and page.",
         {
