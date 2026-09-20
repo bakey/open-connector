@@ -29,6 +29,53 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/// **The published catalog must NAME what the wire was measured to carry.**
+///
+/// Raised in review (coderabbitai on oomol-lab#563) and correct: `looseObject`
+/// lets an undeclared key through at runtime, but it does not put that key in
+/// the schema's `properties` — so a consumer generating types from the catalog
+/// cannot see it. The fixtures below already recorded the gap in prose
+/// ("neither of which any schema here names"); this closes it and pins it.
+///
+/// Asserted on the ACTION's own output schema rather than on a returned row,
+/// because that is the artefact an SDK consumer reads, and the tests that
+/// exercise the return path pass whether or not these are declared — the
+/// fixture comments say so explicitly.
+///
+/// Every one of these was observed on a real personal drive. None is
+/// required: `looseObject` emits no `required` list, so declaring them says
+/// "may appear", which is what was measured.
+describe("list_item_permissions declares the fields it was measured to return", () => {
+  const action = provider.actions.find((candidate) => candidate.name === "list_item_permissions")!;
+  const permission = (action.outputSchema as Record<string, any>).properties.items.items;
+
+  it("names the identity fields a caller can actually key on", () => {
+    for (const set of ["grantedTo", "grantedToV2"]) {
+      const arm = permission.properties[set].properties;
+      // `siteUser` is where the measured personal-drive grant put them, and
+      // `user` is where a business drive does.
+      for (const who of Object.keys(arm)) {
+        expect(Object.keys(arm[who].properties)).toEqual(
+          expect.arrayContaining(["id", "displayName", "email", "loginName"]),
+        );
+      }
+    }
+  });
+
+  it("names the reference fields inheritedFrom was measured to carry", () => {
+    const reference = permission.properties.inheritedFrom.properties;
+    expect(Object.keys(reference)).toEqual(
+      expect.arrayContaining(["driveId", "id", "path", "shareId", "sharepointIds"]),
+    );
+  });
+
+  it("declares none of them required, because each was absent somewhere", () => {
+    const identity = permission.properties.grantedToV2.properties.siteUser;
+    expect(identity.required ?? []).toEqual([]);
+    expect(permission.properties.inheritedFrom.required ?? []).toEqual([]);
+  });
+});
+
 describe("OneDrive transit downloads", () => {
   it("follows the guarded content redirect and stores exact file bytes", async () => {
     const content = new Uint8Array([79, 110, 101, 0, 255]);

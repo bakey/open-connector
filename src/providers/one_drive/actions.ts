@@ -37,6 +37,20 @@ const identity = s.looseObject(
   {
     id: s.string({ description: "Unique identifier for the identity." }),
     displayName: s.string({ description: "Display name for the identity." }),
+    // Measured on a real personal drive, and named here because a consumer
+    // cannot key on a field the published catalog never mentions. `id` is not
+    // the stable one: under `siteUser` it was `"4"`, a SharePoint site-local
+    // index, while the same person's `createdBy.user.id` on the same drive was
+    // a 16-hex CID. The EMAIL was the only identifier that matched anywhere
+    // else.
+    //
+    // Neither is required — `looseObject` emits no `required` list — so this
+    // says "may appear", which is exactly what was observed: present under
+    // `siteUser` and `user`, absent elsewhere.
+    email: s.string({ description: "Email address for the identity, when Graph supplies one." }),
+    loginName: s.string({
+      description: "SharePoint claims login name for the identity, when Graph supplies one.",
+    }),
   },
   { description: "Identity information returned by Microsoft Graph." },
 );
@@ -56,6 +70,13 @@ const driveItemReference = s.looseObject(
     path: s.string({ description: "Percent-encoded path of the referenced item." }),
     driveType: s.string({ description: "Drive type of the referenced item." }),
     siteId: s.string({ description: "Site ID of the referenced item." }),
+    // Richer than the documented `itemReference`, measured inside a
+    // permission's `inheritedFrom` on a personal drive. Both arrived and
+    // neither was named, so they reached a caller only by surviving the
+    // verbatim return — invisible to anything generating types from the
+    // catalog.
+    shareId: s.string({ description: "Sharing ID of the referenced item, when Graph supplies one." }),
+    sharepointIds: rawObject,
   },
   { description: "Reference to another drive item." },
 );
