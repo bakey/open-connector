@@ -8,9 +8,7 @@ const service = "slackbot";
 export const slackbotActions: ActionDefinition[] = slackActions
   .filter(
     (action) =>
-      action.name != "search_messages" &&
-      action.name != "search_context" &&
-      action.name != "get_current_user",
+      action.name != "search_messages" && action.name != "search_context" && action.name != "get_current_user",
   )
   .map((action) =>
     defineProviderAction(service, {
