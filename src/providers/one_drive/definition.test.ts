@@ -2,48 +2,41 @@ import { describe, expect, it } from "vitest";
 import { provider } from "./definition.ts";
 import { oneDriveProviderScopes } from "./scopes.ts";
 
-function oauth() {
+function oauthScopes(): string[] {
   const auth = provider.auth.find((candidate) => candidate.type === "oauth2");
-  expect(auth, "one_drive must keep an oauth2 auth method").toBeDefined();
-  return auth!;
+  if (auth?.type !== "oauth2") {
+    throw new Error("one_drive must keep an oauth2 auth method");
+  }
+  return auth.scopes;
 }
 
 describe("OneDrive provider definition", () => {
-  /**
-   * A read-only client must be able to ask for read-only access.
-   *
-   * `auth.scopes` is the allow-list `normalizeRequestedScopes` checks
-   * `requestedScopes` against, so dropping `Files.Read` from it does not
-   * merely change a default — it makes the scope unrequestable, and every
-   * read-only integration's authorization start fails with
-   * `requestedScopes contains a scope not declared by one_drive`. The
-   * narrowest grant available would become full read/write.
-   */
+  // `auth.scopes` is the allow-list `requestedScopes` is validated against, so
+  // a scope missing from it cannot be requested at all.
   it("declares Files.Read so a read-only client can request it", () => {
-    expect(oauth().scopes).toContain(oneDriveProviderScopes.filesRead);
+    expect(oauthScopes()).toContain(oneDriveProviderScopes.filesRead);
   });
 
-  /**
-   * And the write scope stays, because the write actions need it — the point
-   * is that the client chooses, not that read replaces write.
-   */
   it("still declares Files.ReadWrite for the write actions", () => {
-    expect(oauth().scopes).toContain(oneDriveProviderScopes.filesReadWrite);
+    expect(oauthScopes()).toContain(oneDriveProviderScopes.filesReadWrite);
   });
 
   it("declares the identity and refresh scopes the flow depends on", () => {
-    expect(oauth().scopes).toContain(oneDriveProviderScopes.userRead);
-    expect(oauth().scopes).toContain(oneDriveProviderScopes.offlineAccess);
+    expect(oauthScopes()).toContain(oneDriveProviderScopes.userRead);
+    expect(oauthScopes()).toContain(oneDriveProviderScopes.offlineAccess);
   });
 
-  /**
-   * No `.All` scope is declared. Those are tenant-wide — they read every
-   * user's files, not the signing-in user's — and nothing in this provider
-   * needs one. Declaring one would make it requestable, and an admin-consent
-   * prompt is not something a client should be able to trigger by accident.
-   */
+  it("declares every scope an action requires", () => {
+    const declared = new Set(oauthScopes());
+    const undeclared = provider.actions.flatMap((action) =>
+      action.requiredScopes.filter((scope) => !declared.has(scope)).map((scope) => `${action.name}: ${scope}`),
+    );
+    expect(undeclared).toEqual([]);
+  });
+
+  // `.All` scopes are tenant-wide and need admin consent; no action needs one.
   it("declares no tenant-wide scope", () => {
-    expect(oauth().scopes).not.toContain(oneDriveProviderScopes.filesReadAll);
-    expect(oauth().scopes).not.toContain(oneDriveProviderScopes.filesReadWriteAll);
+    expect(oauthScopes()).not.toContain(oneDriveProviderScopes.filesReadAll);
+    expect(oauthScopes()).not.toContain(oneDriveProviderScopes.filesReadWriteAll);
   });
 });
