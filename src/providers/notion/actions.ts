@@ -265,6 +265,7 @@ const action = (input: {
 export const notionActions: ActionDefinition[] = [
   action({
     name: "get_current_user",
+    operationType: "read",
     description:
       "The workspace and owning user of the connected Notion credential, read from the OAuth grant it was created with. Makes no API call, and refuses a credential whose grant names no workspace — an internal-integration secret cannot.",
     requiredScopes: [],
