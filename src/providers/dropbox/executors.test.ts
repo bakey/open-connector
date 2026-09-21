@@ -217,14 +217,18 @@ describe("Dropbox-API-Arg header encoding", () => {
     ]);
     const { store } = createTransitFileStore(1024);
 
-    const result = await executeDropboxAction("download_file", { path: "/kkndme \u5929\u6daf.pdf" }, store);
+    // DEL (0x7F) is ASCII but not a valid header byte, and Dropbox's docs ask
+    // for it to be escaped alongside non-ASCII; an astral character exercises
+    // the surrogate-pair path.
+    const path = "/kkndme \u5929\u6daf \ud83d\ude00\u007f.pdf";
+    const result = await executeDropboxAction("download_file", { path }, store);
 
     expect(result).toMatchObject({ ok: true });
     // Assert the RAW header, not the parsed object: JSON.parse decodes \uXXXX,
     // so the parsed form is identical either way and cannot fail on a regression.
-    expect(requests[0]?.rawApiArg).toBe(String.raw`{"path":"/kkndme \u5929\u6daf.pdf"}`);
+    expect(requests[0]?.rawApiArg).toBe(String.raw`{"path":"/kkndme \u5929\u6daf \ud83d\ude00\u007f.pdf"}`);
     expect(requests[0]?.rawApiArg).toMatch(/^[\u0020-\u007e]*$/);
-    expect(requests[0]?.apiArg).toEqual({ path: "/kkndme \u5929\u6daf.pdf" });
+    expect(requests[0]?.apiArg).toEqual({ path });
   });
 });
 

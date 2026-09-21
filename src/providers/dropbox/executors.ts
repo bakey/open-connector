@@ -272,8 +272,9 @@ async function getMetadata(input: Record<string, unknown>, accessToken: string, 
 /**
  * Serialize a `Dropbox-API-Arg` header value.
  *
- * Dropbox requires this header to be ASCII: its own docs say non-ASCII must be
- * escaped as `\uXXXX`. `JSON.stringify` does not escape, and Node's `Headers`
+ * Dropbox requires this header to be ASCII: its own docs say `0x7F` and every
+ * non-ASCII character must be escaped as `\uXXXX`, which is also the range the
+ * official JS SDK escapes. `JSON.stringify` does not escape, and Node's `Headers`
  * refuses a value outside ByteString, so a path containing any non-ASCII
  * character threw `TypeError: Cannot convert argument to a ByteString` inside
  * the runtime BEFORE the request was made. `provider-runtime.ts`'s fallback
@@ -284,7 +285,7 @@ async function getMetadata(input: Record<string, unknown>, accessToken: string, 
  * itself accepts either spelling on the wire; only the header build was broken.
  */
 function dropboxApiArg(arg: unknown): string {
-  return JSON.stringify(arg).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return JSON.stringify(arg).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 async function downloadFile(input: Record<string, unknown>, context: ActionContext) {
