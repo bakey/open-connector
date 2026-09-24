@@ -18,12 +18,7 @@ describe("Gmail provider definition", () => {
   it("offers every scope a user OAuth authorization may request, and nothing else", () => {
     const oauth = provider.auth.find((auth) => auth.type === "oauth2");
 
-    expect(oauth?.scopes).toEqual([
-      gmailReadonlyScope,
-      gmailModifyScope,
-      gmailLabelsScope,
-      gmailSettingsBasicScope,
-    ]);
+    expect(oauth?.scopes).toEqual([gmailReadonlyScope, gmailModifyScope, gmailLabelsScope, gmailSettingsBasicScope]);
   });
 
   it("lets a read-only integration authorize without write access to the mailbox", () => {
@@ -36,9 +31,7 @@ describe("Gmail provider definition", () => {
     // the user's mailbox to an integration that only ever lists messages.
     expect(oauth?.scopes).toContain(gmailReadonlyScope);
 
-    const readActions = provider.actions.filter((action) =>
-      action.requiredScopes?.includes(gmailReadonlyScope),
-    );
+    const readActions = provider.actions.filter((action) => action.requiredScopes?.includes(gmailReadonlyScope));
     expect(readActions.length).toBeGreaterThan(0);
   });
 
