@@ -114,6 +114,10 @@ const analyticsPhoneNumbers = s.stringArray(
   "Business phone numbers to include, in international format without the plus sign. Omit to include every number in the WABA.",
 );
 const analyticsCountryCodes = s.stringArray("Two-letter country codes to include. Omit to include every country.");
+const templateAnalyticsDate = s.union([
+  s.integer("UNIX timestamp in seconds; Meta rounds it back to 00:00 UTC of that day.", { minimum: 0 }),
+  s.string("Calendar date as YYYY-MM-DD.", { pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+]);
 const dataPointStart = s.integer("Start of the data point window as a UNIX timestamp in seconds.");
 const dataPointEnd = s.integer("End of the data point window as a UNIX timestamp in seconds.");
 const messageAnalyticsDataPoint = s.looseObject("Message counts for one window.", {
@@ -266,7 +270,7 @@ export const whatsappActions: ActionDefinition[] = [
         }),
         phone_numbers: analyticsPhoneNumbers,
         product_types: s.array(
-          "Message types to include: 0 for template (notification) messages, 2 for customer-service messages. Omit to include all.",
+          "Message types to include: 0 for template messages sent to users, 2 for non-template messages sent to users, 100 for messages received from users. Omit to include all.",
           s.integer("Meta product type code.", { minimum: 0 }),
         ),
         country_codes: analyticsCountryCodes,
@@ -276,6 +280,8 @@ export const whatsappActions: ActionDefinition[] = [
     ),
     outputSchema: s.actionOutput({
       granularity: s.string("Width of each data point as returned by Meta."),
+      phone_numbers: s.stringArray("Business phone numbers the data covers."),
+      country_codes: s.stringArray("Two-letter country codes the data covers."),
       data_points: s.array("One entry per window.", messageAnalyticsDataPoint),
     }),
   }),
@@ -338,14 +344,21 @@ export const whatsappActions: ActionDefinition[] = [
       {
         waba_id: wabaId,
         template_ids: s.stringArray("Meta template IDs to report on.", { minItems: 1, maxItems: 10 }),
-        start: analyticsStart,
-        end: analyticsEnd,
-        metric_types: s.array(
-          "Metrics to return. Omit for all.",
-          s.stringEnum("Template metric.", ["COST", "CLICKED", "DELIVERED", "READ", "SENT"]),
+        start: s.describe(
+          templateAnalyticsDate,
+          "Start of the reporting window. Defaults to 30 days before end. Meta keeps 90 days of history.",
         ),
+        end: s.describe(templateAnalyticsDate, "End of the reporting window. Defaults to today."),
+        metric_types: s.array(
+          "Metrics to return. Omit for all. Conversion metrics such as APP_PURCHASES exist for Marketing Messages API businesses only.",
+          s.string("Template metric, such as COST, CLICKED, DELIVERED, READ, or SENT."),
+        ),
+        product_type: s.stringEnum(["CLOUD_API", "MARKETING_MESSAGES_API_FOR_WHATSAPP"], {
+          description: "Which product's template sends to report on. Omit for Cloud API.",
+        }),
         use_waba_timezone: s.boolean({
-          description: "Whether daily windows follow the WABA's configured timezone instead of UTC.",
+          description:
+            "Whether daily windows follow the WABA's configured timezone instead of UTC. Timestamps passed as start or end are converted to YYYY-MM-DD, which Meta requires in this mode.",
           default: false,
         }),
         after: s.string("Pagination cursor returned by a previous response."),
@@ -354,6 +367,7 @@ export const whatsappActions: ActionDefinition[] = [
       "Input for reading WhatsApp template analytics.",
     ),
     outputSchema: s.actionOutput({
+      waba_timezone: s.string("Timezone the windows are expressed in, present when use_waba_timezone is true."),
       data_points: s.array("One entry per template and day.", templateAnalyticsDataPoint),
       paging,
     }),

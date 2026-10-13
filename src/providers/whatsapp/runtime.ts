@@ -271,10 +271,12 @@ async function whatsappGetMessageAnalytics(
     phase: "execute",
   });
   const analytics = asRecord(payload.analytics, "analytics");
-  return {
+  return compactObject({
     granularity: readString(analytics.granularity) ?? granularity,
+    phone_numbers: readStringArray(analytics.phone_numbers),
+    country_codes: readStringArray(analytics.country_codes),
     data_points: looseArray(analytics.data_points).map((item) => normalizeMessageAnalyticsDataPoint(item)),
-  };
+  });
 }
 
 async function whatsappGetPricingAnalytics(
@@ -315,7 +317,9 @@ async function whatsappGetTemplateAnalytics(
   context: WhatsAppActionContext,
 ): Promise<unknown> {
   const wabaId = requireWabaId(input, context, "get_template_analytics");
-  const window = resolveAnalyticsWindow(input, "get_template_analytics");
+  const useWabaTimezone = optionalBoolean(input.use_waba_timezone) ?? false;
+  const window = resolveTemplateAnalyticsWindow(input, useWabaTimezone);
+  const templateIds = looseArray(input.template_ids);
   const payload = await whatsappRequest<Record<string, unknown>>({
     accessToken: context.accessToken,
     path: `/${wabaId}/template_analytics`,
@@ -324,9 +328,11 @@ async function whatsappGetTemplateAnalytics(
       end: window.end,
       // The template_analytics edge accepts DAILY only.
       granularity: "DAILY",
-      template_ids: graphList(input.template_ids),
+      // Meta's documented syntax: template_ids=[id,id] and metric_types=a,b, both unquoted.
+      template_ids: `[${templateIds.map((id) => String(id)).join(",")}]`,
       metric_types: graphList(input.metric_types),
-      use_waba_timezone: optionalBoolean(input.use_waba_timezone) ? "true" : undefined,
+      product_type: input.product_type,
+      use_waba_timezone: useWabaTimezone ? "true" : undefined,
       after: input.after,
     },
     fetcher: context.fetcher,
@@ -334,10 +340,12 @@ async function whatsappGetTemplateAnalytics(
     operation: "get_template_analytics",
     phase: "execute",
   });
-  return {
+  const buckets = looseArray(payload.data).map((entry) => optionalRecord(entry));
+  return compactObject({
+    waba_timezone: buckets.map((bucket) => readString(bucket?.waba_timezone)).find((zone) => zone !== undefined),
     data_points: flattenAnalyticsData(payload.data).map((item) => normalizeTemplateAnalyticsDataPoint(item)),
     paging: normalizePaging(payload.paging),
-  };
+  });
 }
 
 async function whatsappCreateMessageTemplate(
@@ -804,31 +812,55 @@ function resolveAnalyticsWindow(input: Record<string, unknown>, actionName: stri
 
 /**
  * Render a WABA analytics field with Meta's dot-chained modifier syntax, e.g.
- * `analytics.start(1).end(2).granularity(DAY).phone_numbers(["1650..."])`.
- * Scalars are written bare (Meta expects an unquoted enum for granularity);
- * lists are written as JSON arrays. Empty lists are omitted, which Meta reads
- * as "no filter" exactly like an absent modifier.
+ * `pricing_analytics.start(1).end(2).granularity(DAILY).dimensions(PRICING_CATEGORY,COUNTRY)`.
+ * Every value is written bare, exactly as Meta's reference examples do: no
+ * quotes around enums or phone numbers, lists as comma-separated items. Empty
+ * lists are omitted, which Meta reads as "no filter", the same as an absent
+ * modifier.
  */
 function graphAnalyticsField(field: string, modifiers: Record<string, unknown>): string {
   let rendered = field;
   for (const [key, value] of Object.entries(modifiers)) {
-    if (value == null) continue;
-    if (Array.isArray(value)) {
-      const list = graphList(value);
-      if (list === undefined) continue;
-      rendered += `.${key}(${list})`;
-      continue;
-    }
-    rendered += `.${key}(${String(value)})`;
+    const item = Array.isArray(value) ? graphList(value) : value;
+    if (item == null) continue;
+    rendered += `.${key}(${String(item)})`;
   }
   return rendered;
 }
 
-/** Encode a list the way Graph API query parameters expect it, as a JSON array; `undefined` when empty. */
+/** Comma-separated bare items, the list form Meta's analytics reference uses; `undefined` when empty. */
 function graphList(value: unknown): string | undefined {
   const items = looseArray(value);
   if (items.length === 0) return undefined;
-  return JSON.stringify(items);
+  return items.map((item) => String(item)).join(",");
+}
+
+/**
+ * The template_analytics edge takes a UNIX timestamp or a YYYY-MM-DD date, and
+ * insists on the date form when use_waba_timezone is set. A timestamp given in
+ * that mode is converted to its UTC calendar date so the caller can use one
+ * input shape for both modes.
+ */
+function resolveTemplateAnalyticsWindow(
+  input: Record<string, unknown>,
+  useWabaTimezone: boolean,
+): { start: string | number; end: string | number } {
+  const window = resolveAnalyticsWindow(
+    { start: optionalInteger(input.start), end: optionalInteger(input.end) },
+    "get_template_analytics",
+  );
+  const start = readString(input.start) ?? window.start;
+  const end = readString(input.end) ?? window.end;
+  if (typeof start === "string" && typeof end === "string" && start >= end) {
+    throw providerInputError("whatsapp get_template_analytics requires start to be earlier than end");
+  }
+  if (!useWabaTimezone) return { start, end };
+  return { start: toCalendarDate(start), end: toCalendarDate(end) };
+}
+
+function toCalendarDate(value: string | number): string {
+  if (typeof value === "string") return value;
+  return new Date(value * 1000).toISOString().slice(0, 10);
 }
 
 /** Meta nests `data_points` under one `data[]` entry per granularity/product bucket; callers want one flat list. */
