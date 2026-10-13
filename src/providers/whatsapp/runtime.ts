@@ -2,13 +2,27 @@ import type { CredentialValidationResult, TransitFileWriter } from "../../core/t
 import type { ProviderActionHandlers } from "../provider-runtime.ts";
 import type { ProviderRuntimeHandler } from "../provider-runtime.ts";
 
-import { compactObject, looseArray, optionalNumber, optionalRecord, optionalString } from "../../core/cast.ts";
+import {
+  compactObject,
+  looseArray,
+  optionalBoolean,
+  optionalInteger,
+  optionalNumber,
+  optionalRecord,
+  optionalString,
+} from "../../core/cast.ts";
 import { jsonObject } from "../../core/request.ts";
-import { ProviderRequestError, providerUserAgent, readTransitFileInput } from "../provider-runtime.ts";
+import {
+  ProviderRequestError,
+  providerInputError,
+  providerUserAgent,
+  readTransitFileInput,
+} from "../provider-runtime.ts";
 
 export const whatsappGraphApiBaseUrl = "https://graph.facebook.com";
 export const whatsappGraphApiVersion = "v23.0";
 const whatsappMeFields = "id,name";
+const analyticsDefaultWindowSeconds = 30 * 24 * 60 * 60;
 
 type WhatsAppPhase = "validate" | "execute";
 type WhatsAppActionHandler = ProviderRuntimeHandler<WhatsAppActionContext>;
@@ -49,6 +63,15 @@ export const whatsappActionHandlers: ProviderActionHandlers<"whatsapp", WhatsApp
   },
   get_template_status(input, context) {
     return whatsappGetTemplateStatus(input, context);
+  },
+  get_message_analytics(input, context) {
+    return whatsappGetMessageAnalytics(input, context);
+  },
+  get_pricing_analytics(input, context) {
+    return whatsappGetPricingAnalytics(input, context);
+  },
+  get_template_analytics(input, context) {
+    return whatsappGetTemplateAnalytics(input, context);
   },
   create_message_template(input, context) {
     return whatsappCreateMessageTemplate(input, context);
@@ -130,7 +153,7 @@ async function whatsappGetPhoneNumbers(
   const payload = await whatsappRequest<Record<string, unknown>>({
     accessToken: context.accessToken,
     path: `/${wabaId}/phone_numbers`,
-    query: { limit: input.limit },
+    query: { after: input.after, limit: input.limit },
     fetcher: context.fetcher,
     signal: context.signal,
     operation: "get_phone_numbers",
@@ -215,6 +238,106 @@ async function whatsappGetTemplateStatus(
     phase: "execute",
   });
   return normalizeTemplate(payload);
+}
+
+interface AnalyticsWindow {
+  start: number;
+  end: number;
+}
+
+async function whatsappGetMessageAnalytics(
+  input: Record<string, unknown>,
+  context: WhatsAppActionContext,
+): Promise<unknown> {
+  const wabaId = requireWabaId(input, context, "get_message_analytics");
+  const window = resolveAnalyticsWindow(input, "get_message_analytics");
+  const granularity = readString(input.granularity) ?? "DAY";
+  const payload = await whatsappRequest<Record<string, unknown>>({
+    accessToken: context.accessToken,
+    path: `/${wabaId}`,
+    query: {
+      fields: graphAnalyticsField("analytics", {
+        start: window.start,
+        end: window.end,
+        granularity,
+        phone_numbers: input.phone_numbers,
+        product_types: input.product_types,
+        country_codes: input.country_codes,
+      }),
+    },
+    fetcher: context.fetcher,
+    signal: context.signal,
+    operation: "get_message_analytics",
+    phase: "execute",
+  });
+  const analytics = asRecord(payload.analytics, "analytics");
+  return {
+    granularity: readString(analytics.granularity) ?? granularity,
+    data_points: looseArray(analytics.data_points).map((item) => normalizeMessageAnalyticsDataPoint(item)),
+  };
+}
+
+async function whatsappGetPricingAnalytics(
+  input: Record<string, unknown>,
+  context: WhatsAppActionContext,
+): Promise<unknown> {
+  const wabaId = requireWabaId(input, context, "get_pricing_analytics");
+  const window = resolveAnalyticsWindow(input, "get_pricing_analytics");
+  const payload = await whatsappRequest<Record<string, unknown>>({
+    accessToken: context.accessToken,
+    path: `/${wabaId}`,
+    query: {
+      fields: graphAnalyticsField("pricing_analytics", {
+        start: window.start,
+        end: window.end,
+        granularity: readString(input.granularity) ?? "DAILY",
+        phone_numbers: input.phone_numbers,
+        country_codes: input.country_codes,
+        metric_types: input.metric_types,
+        pricing_types: input.pricing_types,
+        pricing_categories: input.pricing_categories,
+        dimensions: input.dimensions,
+      }),
+    },
+    fetcher: context.fetcher,
+    signal: context.signal,
+    operation: "get_pricing_analytics",
+    phase: "execute",
+  });
+  const analytics = asRecord(payload.pricing_analytics, "pricing_analytics");
+  return {
+    data_points: flattenAnalyticsData(analytics.data).map((item) => normalizePricingAnalyticsDataPoint(item)),
+  };
+}
+
+async function whatsappGetTemplateAnalytics(
+  input: Record<string, unknown>,
+  context: WhatsAppActionContext,
+): Promise<unknown> {
+  const wabaId = requireWabaId(input, context, "get_template_analytics");
+  const window = resolveAnalyticsWindow(input, "get_template_analytics");
+  const payload = await whatsappRequest<Record<string, unknown>>({
+    accessToken: context.accessToken,
+    path: `/${wabaId}/template_analytics`,
+    query: {
+      start: window.start,
+      end: window.end,
+      // The template_analytics edge accepts DAILY only.
+      granularity: "DAILY",
+      template_ids: graphList(input.template_ids),
+      metric_types: graphList(input.metric_types),
+      use_waba_timezone: optionalBoolean(input.use_waba_timezone) ? "true" : undefined,
+      after: input.after,
+    },
+    fetcher: context.fetcher,
+    signal: context.signal,
+    operation: "get_template_analytics",
+    phase: "execute",
+  });
+  return {
+    data_points: flattenAnalyticsData(payload.data).map((item) => normalizeTemplateAnalyticsDataPoint(item)),
+    paging: normalizePaging(payload.paging),
+  };
 }
 
 async function whatsappCreateMessageTemplate(
@@ -670,6 +793,99 @@ function normalizeWebhookConfiguration(value: unknown): Record<string, unknown> 
   const record = optionalRecord(value);
   if (!record) return undefined;
   return compactObject({ application: readString(record.application) });
+}
+
+function resolveAnalyticsWindow(input: Record<string, unknown>, actionName: string): AnalyticsWindow {
+  const end = optionalInteger(input.end) ?? Math.floor(Date.now() / 1000);
+  const start = optionalInteger(input.start) ?? end - analyticsDefaultWindowSeconds;
+  if (start >= end) throw providerInputError(`whatsapp ${actionName} requires start to be earlier than end`);
+  return { start, end };
+}
+
+/**
+ * Render a WABA analytics field with Meta's dot-chained modifier syntax, e.g.
+ * `analytics.start(1).end(2).granularity(DAY).phone_numbers(["1650..."])`.
+ * Scalars are written bare (Meta expects an unquoted enum for granularity);
+ * lists are written as JSON arrays. Empty lists are omitted, which Meta reads
+ * as "no filter" exactly like an absent modifier.
+ */
+function graphAnalyticsField(field: string, modifiers: Record<string, unknown>): string {
+  let rendered = field;
+  for (const [key, value] of Object.entries(modifiers)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      const list = graphList(value);
+      if (list === undefined) continue;
+      rendered += `.${key}(${list})`;
+      continue;
+    }
+    rendered += `.${key}(${String(value)})`;
+  }
+  return rendered;
+}
+
+/** Encode a list the way Graph API query parameters expect it, as a JSON array; `undefined` when empty. */
+function graphList(value: unknown): string | undefined {
+  const items = looseArray(value);
+  if (items.length === 0) return undefined;
+  return JSON.stringify(items);
+}
+
+/** Meta nests `data_points` under one `data[]` entry per granularity/product bucket; callers want one flat list. */
+function flattenAnalyticsData(value: unknown): unknown[] {
+  return looseArray(value).flatMap((entry) => looseArray(optionalRecord(entry)?.data_points));
+}
+
+function normalizeMessageAnalyticsDataPoint(value: unknown): Record<string, unknown> {
+  const record = asRecord(value, "analytics.data_points[]");
+  return compactObject({
+    start: optionalNumber(record.start),
+    end: optionalNumber(record.end),
+    sent: optionalNumber(record.sent),
+    delivered: optionalNumber(record.delivered),
+  });
+}
+
+function normalizePricingAnalyticsDataPoint(value: unknown): Record<string, unknown> {
+  const record = asRecord(value, "pricing_analytics.data_points[]");
+  return compactObject({
+    start: optionalNumber(record.start),
+    end: optionalNumber(record.end),
+    volume: optionalNumber(record.volume),
+    cost: optionalNumber(record.cost),
+    phone_number: readString(record.phone_number),
+    country: readString(record.country),
+    pricing_category: readString(record.pricing_category),
+    pricing_type: readString(record.pricing_type),
+    tier: readString(record.tier),
+  });
+}
+
+function normalizeTemplateAnalyticsDataPoint(value: unknown): Record<string, unknown> {
+  const record = asRecord(value, "template_analytics.data_points[]");
+  return compactObject({
+    template_id: readString(record.template_id) ?? "",
+    start: optionalNumber(record.start),
+    end: optionalNumber(record.end),
+    sent: optionalNumber(record.sent),
+    delivered: optionalNumber(record.delivered),
+    read: optionalNumber(record.read),
+    clicked: looseArray(record.clicked).map((item) => {
+      const click = asRecord(item, "template_analytics.clicked[]");
+      return compactObject({
+        type: readString(click.type) ?? "",
+        button_content: readString(click.button_content) ?? "",
+        count: optionalNumber(click.count) ?? 0,
+      });
+    }),
+    cost: looseArray(record.cost).map((item) => {
+      const cost = asRecord(item, "template_analytics.cost[]");
+      return compactObject({
+        type: readString(cost.type) ?? "",
+        value: optionalNumber(cost.value),
+      });
+    }),
+  });
 }
 
 function normalizePaging(value: unknown): Record<string, unknown> | undefined {
