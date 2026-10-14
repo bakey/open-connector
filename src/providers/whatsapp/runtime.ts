@@ -845,17 +845,24 @@ function resolveTemplateAnalyticsWindow(
   input: Record<string, unknown>,
   useWabaTimezone: boolean,
 ): { start: string | number; end: string | number } {
+  const startDate = readString(input.start);
+  const endDate = readString(input.end);
   const window = resolveAnalyticsWindow(
-    { start: optionalInteger(input.start), end: optionalInteger(input.end) },
+    {
+      start: startDate === undefined ? optionalInteger(input.start) : Date.parse(startDate) / 1000,
+      end: endDate === undefined ? optionalInteger(input.end) : Date.parse(endDate) / 1000,
+    },
     "get_template_analytics",
   );
-  const start = readString(input.start) ?? window.start;
-  const end = readString(input.end) ?? window.end;
-  if (typeof start === "string" && typeof end === "string" && start >= end) {
+  const start = startDate ?? window.start;
+  const end = endDate ?? window.end;
+  if (!useWabaTimezone) return { start, end };
+  const calendarStart = toCalendarDate(start);
+  const calendarEnd = toCalendarDate(end);
+  if (calendarStart >= calendarEnd) {
     throw providerInputError("whatsapp get_template_analytics requires start to be earlier than end");
   }
-  if (!useWabaTimezone) return { start, end };
-  return { start: toCalendarDate(start), end: toCalendarDate(end) };
+  return { start: calendarStart, end: calendarEnd };
 }
 
 function toCalendarDate(value: string | number): string {

@@ -169,6 +169,48 @@ describe("WhatsApp analytics", () => {
     expect(result).toEqual({ data_points: [] });
   });
 
+  it.each([
+    { start: 1718064000, end: "2024-06-01" },
+    { start: "2024-06-12", end: 1718064000 },
+    { start: "2024-06-11", end: 1718064000 },
+    { start: 1718064000, end: 1718067600, use_waba_timezone: true },
+  ])("rejects invalid resolved template windows: %j", async (input) => {
+    const captured: CapturedRequest[] = [];
+    const context = createContext(() => ({ data: [] }), captured);
+
+    await expect(
+      whatsappActionHandlers.get_template_analytics({ template_ids: ["987"], ...input }, context),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(captured).toHaveLength(0);
+  });
+
+  it.each([
+    { start: "2024-06-01", end: 1718064000 },
+    { start: 1718064000, end: "2024-06-12" },
+    { start: 1718064000, end: 1718067600 },
+  ])("preserves valid mixed and sub-day template windows: %j", async (input) => {
+    const captured: CapturedRequest[] = [];
+    const context = createContext(() => ({ data: [] }), captured);
+
+    await whatsappActionHandlers.get_template_analytics({ template_ids: ["987"], ...input }, context);
+
+    expect(captured[0]?.url.searchParams.get("start")).toBe(String(input.start));
+    expect(captured[0]?.url.searchParams.get("end")).toBe(String(input.end));
+  });
+
+  it("defaults template start relative to a date-string end", async () => {
+    const captured: CapturedRequest[] = [];
+    const context = createContext(() => ({ data: [] }), captured);
+
+    await whatsappActionHandlers.get_template_analytics(
+      { template_ids: ["987"], end: "2024-06-11", use_waba_timezone: true },
+      context,
+    );
+
+    expect(captured[0]?.url.searchParams.get("start")).toBe("2024-05-12");
+    expect(captured[0]?.url.searchParams.get("end")).toBe("2024-06-11");
+  });
+
   it("rejects a window whose start is not earlier than its end before calling Meta", async () => {
     const captured: CapturedRequest[] = [];
     const context = createContext(() => ({}), captured);
