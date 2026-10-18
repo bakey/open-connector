@@ -15,7 +15,20 @@ export type GitHubActionContext = {
   fetcher: typeof fetch;
   transitFiles?: TransitFileWriter;
   signal?: AbortSignal;
+  /**
+   * Present when the run authenticates as a GitHub App installation rather
+   * than a user. `accessToken` is then an installation token; handlers whose
+   * endpoint assumes a user (`/user`, `/user/repos`) read this to answer from
+   * the installation instead.
+   */
+  installation?: GitHubInstallationContext;
 };
+
+export interface GitHubInstallationContext {
+  installationId: string;
+  /** Sign an App JWT for the `/app/...` endpoints an installation token cannot call. */
+  appJwt(): Promise<string>;
+}
 
 export type GitHubActionHandler = (input: Record<string, unknown>, context: GitHubActionContext) => Promise<unknown>;
 
