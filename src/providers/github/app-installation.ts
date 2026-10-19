@@ -43,7 +43,7 @@ interface GitHubInstallationToken {
   repositorySelection: string | undefined;
 }
 
-interface GitHubAppInstallation {
+export interface GitHubAppInstallation {
   id: number;
   account: Record<string, unknown>;
   permissions: Record<string, string>;
@@ -54,15 +54,16 @@ interface GitHubAppInstallation {
 /**
  * Access to one installation for an action run.
  *
- * Handlers mostly need `accessToken()`. The identity actions need the App JWT
+ * Handlers mostly need `accessToken()`. The identity action needs `describe()`
  * as well, because an installation token cannot describe its own installation:
  * `GET /user` answers 403 for it, and `GET /app/installations/{id}` takes the
- * App JWT.
+ * App JWT. Only that one lookup is exposed — never the JWT itself, which could
+ * mint tokens for any installation of the App.
  */
 interface GitHubAppInstallationAccess {
   readonly installationId: string;
   accessToken(): Promise<string>;
-  appJwt(): Promise<string>;
+  describe(): Promise<GitHubAppInstallation>;
 }
 
 export function readGitHubAppInstallationCredential(values: Record<string, string>): GitHubAppInstallationCredential {
@@ -242,13 +243,23 @@ function cachedInstallationToken(
 ): Promise<GitHubInstallationToken> {
   const key = `${credential.appId}:${credential.installationId}`;
   const cached = installationTokens.get(key);
-  if (cached) {
-    return cached.then(
-      (token) => (isFresh(token) ? token : refreshInstallationToken(key, credential, fetcher)),
-      () => refreshInstallationToken(key, credential, fetcher),
-    );
+  if (!cached) {
+    return refreshInstallationToken(key, credential, fetcher);
   }
-  return refreshInstallationToken(key, credential, fetcher);
+  // No rejection handler, deliberately. A caller that joined an in-flight mint
+  // is told that the mint failed; the eviction in `refreshInstallationToken`
+  // has already made the NEXT call start over, so retrying here would turn one
+  // failure into a burst of one retry per waiting caller.
+  return cached.then((token) => {
+    if (isFresh(token)) {
+      return token;
+    }
+    // Stale. Another caller may already have started the replacement while
+    // this one was waiting on the old promise; join it rather than minting a
+    // second token for the same installation.
+    const latest = installationTokens.get(key);
+    return latest && latest !== cached ? latest : refreshInstallationToken(key, credential, fetcher);
+  });
 }
 
 function refreshInstallationToken(
@@ -288,6 +299,6 @@ export function createGitHubAppInstallationAccess(
   return {
     installationId: credential.installationId,
     accessToken: async () => (await cachedInstallationToken(credential, fetcher)).token,
-    appJwt: () => signGitHubAppJwt(credential),
+    describe: () => fetchGitHubAppInstallation(credential, fetcher),
   };
 }

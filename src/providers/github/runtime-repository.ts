@@ -19,7 +19,7 @@ import {
 export const repositoryActionHandlers: ProviderActionHandlerSubset<"github", GitHubActionHandler> = {
   async get_current_user(_input, { accessToken, fetcher, installation }) {
     if (installation) {
-      return getInstallationAccount(installation, fetcher);
+      return getInstallationAccount(installation);
     }
     return githubRequestJson<Record<string, unknown>>({
       path: "/user",
@@ -370,13 +370,9 @@ async function listMyRepositories(input: Record<string, unknown>, accessToken: s
  * documented shape see a complete object, and the installation itself is
  * attached so a caller can tell which kind of identity it got.
  */
-async function getInstallationAccount(installation: GitHubInstallationContext, fetcher: typeof fetch) {
-  const detail = await githubRequestJson<Record<string, unknown>>({
-    path: `/app/installations/${encodeURIComponent(installation.installationId)}`,
-    accessToken: await installation.appJwt(),
-    fetcher,
-  });
-  const account = (detail.account ?? {}) as Record<string, unknown>;
+async function getInstallationAccount(installation: GitHubInstallationContext) {
+  const detail = await installation.describe();
+  const account = detail.account ?? {};
   return {
     name: null,
     email: null,

@@ -49,8 +49,9 @@ export const executors: ProviderExecutors = defineProviderExecutors<GitHubAction
     if (credential?.authType === "custom_credential") {
       // A GitHub App installation: the stored values are the App's key and
       // the installation id, not a token. Mint (or reuse) the installation
-      // token here so every handler sees a plain bearer, and hand the App
-      // JWT to the handlers whose endpoint has no installation equivalent.
+      // token here so every handler sees a plain bearer, and hand the handlers
+      // whose endpoint has no installation equivalent the one App-level read
+      // they need — not the App JWT, which could mint for any installation.
       const installation = createGitHubAppInstallationAccess(credential.values, fetcher);
       return {
         accessToken: await installation.accessToken(),
@@ -59,7 +60,7 @@ export const executors: ProviderExecutors = defineProviderExecutors<GitHubAction
         signal: context.signal,
         installation: {
           installationId: installation.installationId,
-          appJwt: installation.appJwt,
+          describe: installation.describe,
         },
       };
     }

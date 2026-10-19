@@ -1,4 +1,5 @@
 import type { TransitFileWriter } from "../../core/types.ts";
+import type { GitHubAppInstallation } from "./app-installation.ts";
 
 import { compactObject, optionalInteger, optionalString, optionalRawString } from "../../core/cast.ts";
 import { ProviderRequestError } from "../provider-runtime.ts";
@@ -26,8 +27,12 @@ export type GitHubActionContext = {
 
 export interface GitHubInstallationContext {
   installationId: string;
-  /** Sign an App JWT for the `/app/...` endpoints an installation token cannot call. */
-  appJwt(): Promise<string>;
+  /**
+   * Describe this installation (`GET /app/installations/{id}`, authenticated
+   * as the App). The one App-level read the identity action needs; the App JWT
+   * itself is not exposed to handlers.
+   */
+  describe(): Promise<GitHubAppInstallation>;
 }
 
 export type GitHubActionHandler = (input: Record<string, unknown>, context: GitHubActionContext) => Promise<unknown>;

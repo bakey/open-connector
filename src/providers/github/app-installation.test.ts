@@ -181,4 +181,44 @@ describe("GitHub installation token cache", () => {
     expect(await one.accessToken()).toBe("ghs_one");
     expect(await two.accessToken()).toBe("ghs_two");
   });
+
+  it("joins one replacement mint when concurrent callers all find the token stale", async () => {
+    vi.useFakeTimers({ now: Date.parse("2026-10-18T02:00:00Z") });
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(mintResponse(60 * 60 * 1000, "ghs_first"))
+      .mockResolvedValueOnce(mintResponse(60 * 60 * 1000, "ghs_second"));
+    const access = createGitHubAppInstallationAccess({ appId, installationId, privateKey: key.pkcs1 }, fetcher);
+    expect(await access.accessToken()).toBe("ghs_first");
+
+    vi.setSystemTime(Date.parse("2026-10-18T02:56:00Z"));
+    const tokens = await Promise.all([access.accessToken(), access.accessToken(), access.accessToken()]);
+
+    expect(tokens).toEqual(["ghs_second", "ghs_second", "ghs_second"]);
+    // One initial mint, one replacement — not one replacement per waiting caller.
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a failed mint to every caller that joined it, without a retry burst", async () => {
+    let answerMint: ((response: Response) => void) | undefined;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(new Promise<Response>((resolve) => (answerMint = resolve)))
+      .mockResolvedValueOnce(mintResponse(60 * 60 * 1000));
+    const access = createGitHubAppInstallationAccess({ appId, installationId, privateKey: key.pkcs1 }, fetcher);
+
+    const first = access.accessToken();
+    const second = access.accessToken();
+    // The mint signs a JWT before it fetches, so wait for the single request;
+    // both callers are then waiting on the same in-flight mint.
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    answerMint!(Response.json({ message: "Bad credentials" }, { status: 401 }));
+
+    await expect(first).rejects.toMatchObject({ status: 401 });
+    await expect(second).rejects.toMatchObject({ status: 401 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // The failure was evicted, so the next call starts over and succeeds.
+    expect(await access.accessToken()).toBe("ghs_minted");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
 });
