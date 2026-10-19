@@ -1,6 +1,7 @@
 import { importPKCS8, SignJWT } from "jose";
+import { sha256Hex } from "../../core/aws-sigv4.ts";
 import { base64Bytes, optionalRecord, optionalString, stringRecord } from "../../core/cast.ts";
-import { ProviderRequestError, requiredInputString } from "../provider-runtime.ts";
+import { ProviderRequestError, requiredInputString, runProviderRequest } from "../provider-runtime.ts";
 import { githubRequestJson } from "./runtime-shared.ts";
 
 /**
@@ -43,27 +44,12 @@ interface GitHubInstallationToken {
   repositorySelection: string | undefined;
 }
 
-export interface GitHubAppInstallation {
+interface GitHubAppInstallation {
   id: number;
   account: Record<string, unknown>;
   permissions: Record<string, string>;
   repository_selection: string;
   [key: string]: unknown;
-}
-
-/**
- * Access to one installation for an action run.
- *
- * Handlers mostly need `accessToken()`. The identity action needs `describe()`
- * as well, because an installation token cannot describe its own installation:
- * `GET /user` answers 403 for it, and `GET /app/installations/{id}` takes the
- * App JWT. Only that one lookup is exposed — never the JWT itself, which could
- * mint tokens for any installation of the App.
- */
-interface GitHubAppInstallationAccess {
-  readonly installationId: string;
-  accessToken(): Promise<string>;
-  describe(): Promise<GitHubAppInstallation>;
 }
 
 export function readGitHubAppInstallationCredential(values: Record<string, string>): GitHubAppInstallationCredential {
@@ -192,42 +178,50 @@ export async function signGitHubAppJwt(credential: GitHubAppInstallationCredenti
 export async function fetchGitHubAppInstallation(
   credential: GitHubAppInstallationCredential,
   fetcher: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<GitHubAppInstallation> {
-  return githubRequestJson<GitHubAppInstallation>({
-    path: `/app/installations/${encodeURIComponent(credential.installationId)}`,
-    accessToken: await signGitHubAppJwt(credential),
-    fetcher,
-  });
+  return runProviderRequest({ label: "GitHub installation", signal }, async (signal) =>
+    githubRequestJson<GitHubAppInstallation>({
+      path: `/app/installations/${encodeURIComponent(credential.installationId)}`,
+      accessToken: await signGitHubAppJwt(credential),
+      fetcher,
+      signal,
+    }),
+  );
 }
 
 /** Mint an installation access token with the App's full granted permissions. */
 export async function mintGitHubInstallationToken(
   credential: GitHubAppInstallationCredential,
   fetcher: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<GitHubInstallationToken> {
-  const minted = await githubRequestJson<Record<string, unknown>>({
-    method: "POST",
-    path: `/app/installations/${encodeURIComponent(credential.installationId)}/access_tokens`,
-    body: {},
-    accessToken: await signGitHubAppJwt(credential),
-    fetcher,
+  return runProviderRequest({ label: "GitHub installation token", signal }, async (signal) => {
+    const minted = await githubRequestJson<Record<string, unknown>>({
+      method: "POST",
+      path: `/app/installations/${encodeURIComponent(credential.installationId)}/access_tokens`,
+      body: {},
+      accessToken: await signGitHubAppJwt(credential),
+      fetcher,
+      signal,
+    });
+    const token = optionalString(minted.token);
+    const expiresAt = optionalString(minted.expires_at);
+    if (!token || !expiresAt) {
+      throw new ProviderRequestError(500, "GitHub returned an installation token without a token or expiry", 502);
+    }
+    return {
+      token,
+      expiresAt,
+      permissions: stringRecord(optionalRecord(minted.permissions) ?? {}),
+      repositorySelection: optionalString(minted.repository_selection),
+    };
   });
-  const token = typeof minted.token === "string" ? minted.token : undefined;
-  const expiresAt = typeof minted.expires_at === "string" ? minted.expires_at : undefined;
-  if (!token || !expiresAt) {
-    throw new ProviderRequestError(500, "GitHub returned an installation token without a token or expiry", 502);
-  }
-  return {
-    token,
-    expiresAt,
-    permissions: stringRecord(optionalRecord(minted.permissions) ?? {}),
-    repositorySelection: optionalString(minted.repository_selection),
-  };
 }
 
 /**
- * Installation tokens shared across action runs in this process, keyed by App
- * and installation. A token is reused until five minutes before GitHub expires
+ * Installation tokens shared across action runs in this process, keyed by App,
+ * installation and private-key digest. A token is reused until five minutes before GitHub expires
  * it; a failed mint evicts itself so the next run retries instead of inheriting
  * the rejection.
  */
@@ -241,7 +235,7 @@ function cachedInstallationToken(
   credential: GitHubAppInstallationCredential,
   fetcher: typeof fetch,
 ): Promise<GitHubInstallationToken> {
-  const key = `${credential.appId}:${credential.installationId}`;
+  const key = `${credential.appId}:${credential.installationId}:${sha256Hex(credential.privateKey)}`;
   const cached = installationTokens.get(key);
   if (!cached) {
     return refreshInstallationToken(key, credential, fetcher);
@@ -287,18 +281,29 @@ function isFresh(token: GitHubInstallationToken): boolean {
   return Number.isFinite(expiresAt) && expiresAt - Date.now() > installationTokenRenewalMarginMs;
 }
 
-/**
- * Build the installation access for one action run. The token is resolved on
- * first use and shared with concurrent runs through the process cache.
- */
-export function createGitHubAppInstallationAccess(
+/** Resolve installation tokens without letting one caller cancel a shared mint. */
+export function createGitHubInstallationTokenResolver(
   values: Record<string, string>,
   fetcher: typeof fetch,
-): GitHubAppInstallationAccess {
+): (signal?: AbortSignal) => Promise<string> {
   const credential = readGitHubAppInstallationCredential(values);
-  return {
-    installationId: credential.installationId,
-    accessToken: async () => (await cachedInstallationToken(credential, fetcher)).token,
-    describe: () => fetchGitHubAppInstallation(credential, fetcher),
+  return async (signal) => {
+    signal?.throwIfAborted();
+    const pending = cachedInstallationToken(credential, fetcher);
+    if (!signal) return (await pending).token;
+    return new Promise<string>((resolve, reject) => {
+      const abort = (): void => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      void pending.then(
+        (token) => {
+          signal.removeEventListener("abort", abort);
+          resolve(token.token);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+    });
   };
 }

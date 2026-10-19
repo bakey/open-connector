@@ -3,7 +3,7 @@ import type { ExecutionContext, ResolvedCredential } from "../../core/types.ts";
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearGitHubInstallationTokenCache } from "./app-installation.ts";
-import { credentialValidators, executors } from "./executors.ts";
+import { credentialValidators, executors, proxy } from "./executors.ts";
 
 const appId = "5360099";
 const installationId = "172567438";
@@ -117,27 +117,35 @@ describe("GitHub App installation credential", () => {
     expect(new URL(requests[1]!.url).searchParams.get("affiliation")).toBe("all");
   });
 
-  it("answers get_current_user from the installation's account, authenticated as the App", async () => {
-    const requests = stubFetch([() => mintResponse(), () => installationResponse()]);
-
+  it("rejects get_current_user for installations before making any request", async () => {
+    const requests = stubFetch([]);
     const result = await executors["github.get_current_user"]!({}, installationContext);
-
     expect(result).toMatchObject({
-      ok: true,
-      output: {
-        login: "bakey",
-        id: 1566848,
-        type: "User",
-        name: null,
-        email: null,
-        installation: { id: Number(installationId), repository_selection: "selected" },
+      ok: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining("requires a personal access token or OAuth user credential"),
       },
     });
-    expect(new URL(requests[1]!.url).pathname).toBe(`/app/installations/${installationId}`);
-    // The installation detail is an App endpoint: it takes the JWT, not the installation token.
-    expect(isAppJwt(requests[1]!.headers.get("authorization"))).toBe(true);
-    expect(requests[1]!.headers.get("authorization")).not.toBe(`Bearer ${installationToken}`);
+    expect(requests).toHaveLength(0);
   });
+
+  it.each(["visibility", "sort", "direction"])(
+    "rejects unsupported installation listing parameter %s",
+    async (field) => {
+      const requests = stubFetch([() => mintResponse()]);
+      const input = { visibility: "public", sort: "updated", direction: "desc" };
+      const result = await executors["github.list_my_repositories"]!(
+        { [field]: input[field as keyof typeof input] },
+        installationContext,
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "invalid_input", message: expect.stringContaining(`${field} is not supported`) },
+      });
+      expect(requests).toHaveLength(1);
+    },
+  );
 
   it("lists the installation's repositories instead of the user's", async () => {
     const requests = stubFetch([
@@ -153,10 +161,7 @@ describe("GitHub App installation credential", () => {
         }),
     ]);
 
-    const result = await executors["github.list_my_repositories"]!(
-      { perPage: 100, page: 1, sort: "updated" },
-      installationContext,
-    );
+    const result = await executors["github.list_my_repositories"]!({ perPage: 100, page: 1 }, installationContext);
 
     expect(result).toMatchObject({
       ok: true,
@@ -173,18 +178,32 @@ describe("GitHub App installation credential", () => {
     expect(requests[1]!.headers.get("authorization")).toBe(`Bearer ${installationToken}`);
   });
 
-  it("keeps the user endpoints for token credentials", async () => {
+  it.each(["api_key", "oauth2"])("keeps the user endpoints for %s credentials", async (authType) => {
+    const context: ExecutionContext =
+      authType === "api_key"
+        ? apiKeyContext
+        : {
+            getCredential: async () => ({
+              authType: "oauth2",
+              accessToken: "oauth_token",
+              tokenType: "Bearer",
+              profile: { accountId: "bakey", displayName: "bakey", grantedScopes: [] },
+              metadata: {},
+            }),
+          };
     const requests = stubFetch([
       () => Response.json({ login: "bakey", id: 1566848 }),
       () => Response.json([{ id: 1, name: "Kairos", full_name: "bakey/Kairos" }]),
     ]);
 
-    await executors["github.get_current_user"]!({}, apiKeyContext);
-    await executors["github.list_my_repositories"]!({ sort: "updated" }, apiKeyContext);
+    await executors["github.get_current_user"]!({}, context);
+    await executors["github.list_my_repositories"]!({ sort: "updated" }, context);
 
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/user", "/user/repos"]);
     expect(new URL(requests[1]!.url).searchParams.get("sort")).toBe("updated");
-    expect(requests[0]!.headers.get("authorization")).toBe("Bearer github_pat_secret");
+    expect(requests[0]!.headers.get("authorization")).toBe(
+      authType === "api_key" ? "Bearer github_pat_secret" : "Bearer oauth_token",
+    );
   });
 
   it("surfaces a refused mint as the action's error instead of calling the endpoint", async () => {
@@ -194,6 +213,33 @@ describe("GitHub App installation credential", () => {
 
     expect(result).toMatchObject({ ok: false, error: { message: "Bad credentials" } });
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe("GitHub installation cancellation", () => {
+  it.each(["action", "proxy"])("cancels a %s while another caller finishes the shared mint", async (entry) => {
+    const mint = Promise.withResolvers<Response>();
+    const requests: Request[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return request.url.endsWith("/access_tokens") ? mint.promise : Response.json({ id: 1 });
+    });
+    const controller = new AbortController();
+    const context = { ...installationContext, signal: controller.signal };
+    const cancelled =
+      entry === "action"
+        ? executors["github.get_repository"]!({ owner: "bakey", repo: "Kairos" }, context)
+        : proxy({ method: "GET", endpoint: "/repos/bakey/Kairos" }, context);
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    const remaining = proxy({ method: "GET", endpoint: "/repos/bakey/Kairos" }, installationContext);
+    controller.abort();
+    expect(await cancelled).toMatchObject({ ok: false });
+    expect(requests[0]!.signal.aborted).toBe(false);
+    mint.resolve(mintResponse());
+    expect(await remaining).toMatchObject({ ok: true });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.headers.get("authorization")).toBe(`Bearer ${installationToken}`);
   });
 });
 
@@ -225,6 +271,25 @@ describe("GitHub App installation validation", () => {
       `POST /app/installations/${installationId}/access_tokens`,
     ]);
     expect(isAppJwt(requests[0]!.headers.get("authorization"))).toBe(true);
+  });
+
+  it.each(["describe", "mint"])("cancels credential validation during %s", async (stage) => {
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>((_url, init) => {
+      if (stage === "mint" && fetcher.mock.calls.length === 1) return Promise.resolve(installationResponse());
+      return new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+      });
+    });
+    const result = expect(
+      credentialValidators.customCredential!(
+        { values: { appId, installationId, privateKey } },
+        { fetcher, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ status: 504 });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(stage === "mint" ? 2 : 1));
+    controller.abort();
+    await result;
   });
 
   it("refuses an installation the App does not own", async () => {

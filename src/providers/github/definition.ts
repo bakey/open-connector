@@ -90,7 +90,7 @@ export const provider: ProviderDefinition = {
       type: "custom_credential",
       label: "GitHub App installation",
       description:
-        "Authenticate as a GitHub App installed on an account. The runtime signs a JWT with the App's private key and mints one-hour installation access tokens on demand, so no token is pasted or stored. The token can read the repositories the installation selected plus the content of any public repository; it is not a user, so actions that describe the authenticated user describe the installation's account instead.",
+        "Authenticate as a GitHub App installed on an account. The runtime signs a JWT with the App's private key and mints one-hour installation access tokens on demand, so no token is pasted or stored. The token can read the repositories the installation selected plus the content of any public repository; user-only actions such as get_current_user are not supported.",
       fields: [
         {
           key: "appId",

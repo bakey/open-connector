@@ -1,5 +1,4 @@
 import type { TransitFileWriter } from "../../core/types.ts";
-import type { GitHubAppInstallation } from "./app-installation.ts";
 
 import { compactObject, optionalInteger, optionalString, optionalRawString } from "../../core/cast.ts";
 import { ProviderRequestError } from "../provider-runtime.ts";
@@ -16,28 +15,13 @@ export type GitHubActionContext = {
   fetcher: typeof fetch;
   transitFiles?: TransitFileWriter;
   signal?: AbortSignal;
-  /**
-   * Present when the run authenticates as a GitHub App installation rather
-   * than a user. `accessToken` is then an installation token; handlers whose
-   * endpoint assumes a user (`/user`, `/user/repos`) read this to answer from
-   * the installation instead.
-   */
-  installation?: GitHubInstallationContext;
+  installation?: boolean;
 };
-
-export interface GitHubInstallationContext {
-  installationId: string;
-  /**
-   * Describe this installation (`GET /app/installations/{id}`, authenticated
-   * as the App). The one App-level read the identity action needs; the App JWT
-   * itself is not exposed to handlers.
-   */
-  describe(): Promise<GitHubAppInstallation>;
-}
 
 export type GitHubActionHandler = (input: Record<string, unknown>, context: GitHubActionContext) => Promise<unknown>;
 
 interface GitHubJsonRequest {
+  signal?: AbortSignal;
   method?: string;
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
@@ -73,6 +57,7 @@ export async function githubRequestJson<T>(input: GitHubJsonRequest): Promise<T>
   const url = buildGitHubUrl(input.path, input.query);
   const response = await input.fetcher(url, {
     method: input.method ?? "GET",
+    signal: input.signal,
     headers: githubHeaders(input.accessToken, input.body !== undefined),
     body: input.body === undefined ? undefined : JSON.stringify(input.body),
   });

@@ -16,7 +16,7 @@ import {
   requireBearerCredential,
 } from "../provider-runtime.ts";
 import {
-  createGitHubAppInstallationAccess,
+  createGitHubInstallationTokenResolver,
   fetchGitHubAppInstallation,
   mintGitHubInstallationToken,
   readGitHubAppInstallationCredential,
@@ -32,47 +32,56 @@ import { githubRepoEvent } from "./trigger-on-repo-event.ts";
 import { githubPullRequestListener } from "./trigger-watch-pull-request.ts";
 
 const service = "github";
-
-export const executors: ProviderExecutors = defineProviderExecutors<GitHubActionContext>({
+const { get_current_user, ...installationHandlers } = combineProviderActionHandlers<"github", GitHubActionHandler>(
   service,
-  handlers: combineProviderActionHandlers<"github", GitHubActionHandler>(
+  activityActionHandlers,
+  repositoryActionHandlers,
+  issueActionHandlers,
+  pullRequestActionHandlers,
+  releaseActionHandlers,
+  searchActionHandlers,
+);
+
+export const executors: ProviderExecutors = {
+  ...defineProviderExecutors<GitHubActionContext>({
     service,
-    activityActionHandlers,
-    repositoryActionHandlers,
-    issueActionHandlers,
-    pullRequestActionHandlers,
-    releaseActionHandlers,
-    searchActionHandlers,
-  ),
-  async createContext(context, fetcher): Promise<GitHubActionContext> {
-    const credential = await context.getCredential(service);
-    if (credential?.authType === "custom_credential") {
-      // A GitHub App installation: the stored values are the App's key and
-      // the installation id, not a token. Mint (or reuse) the installation
-      // token here so every handler sees a plain bearer, and hand the handlers
-      // whose endpoint has no installation equivalent the one App-level read
-      // they need — not the App JWT, which could mint for any installation.
-      const installation = createGitHubAppInstallationAccess(credential.values, fetcher);
+    handlers: installationHandlers,
+    async createContext(context, fetcher): Promise<GitHubActionContext> {
+      const credential = await context.getCredential(service);
+      if (credential?.authType === "custom_credential") {
+        return {
+          accessToken: await createGitHubInstallationTokenResolver(credential.values, fetcher)(context.signal),
+          fetcher,
+          transitFiles: context.transitFiles,
+          signal: context.signal,
+          installation: true,
+        };
+      }
+      const bearer = await requireBearerCredential(context, service);
       return {
-        accessToken: await installation.accessToken(),
+        accessToken: bearer.accessToken,
         fetcher,
         transitFiles: context.transitFiles,
         signal: context.signal,
-        installation: {
-          installationId: installation.installationId,
-          describe: installation.describe,
-        },
       };
-    }
-    const bearer = await requireBearerCredential(context, service);
-    return {
-      accessToken: bearer.accessToken,
-      fetcher,
-      transitFiles: context.transitFiles,
-      signal: context.signal,
-    };
-  },
-});
+    },
+  }),
+  ...defineProviderExecutors<GitHubActionContext>({
+    service,
+    handlers: { get_current_user },
+    async createContext(context, fetcher) {
+      const credential = await context.getCredential(service);
+      if (credential?.authType === "custom_credential") {
+        throw new ProviderRequestError(
+          400,
+          "get_current_user requires a personal access token or OAuth user credential. This connection uses a GitHub App installation.",
+        );
+      }
+      const bearer = await requireBearerCredential(context, service);
+      return { accessToken: bearer.accessToken, fetcher, signal: context.signal };
+    },
+  }),
+};
 
 export const proxy: ProviderProxyExecutor = defineProviderProxy({
   service,
@@ -95,7 +104,7 @@ export const proxy: ProviderProxyExecutor = defineProviderProxy({
 async function resolveGitHubAccessToken(context: ExecutionContext, fetcher: typeof fetch): Promise<string> {
   const credential = await context.getCredential(service);
   if (credential?.authType === "custom_credential") {
-    return createGitHubAppInstallationAccess(credential.values, fetcher).accessToken();
+    return createGitHubInstallationTokenResolver(credential.values, fetcher)(context.signal);
   }
   return (await requireBearerCredential(context, service)).accessToken;
 }
@@ -107,8 +116,8 @@ export const credentialValidators: CredentialValidators = {
   async oauth2(input, { fetcher }) {
     return validateGitHubToken(input.accessToken, fetcher);
   },
-  async customCredential(input, { fetcher }) {
-    return validateGitHubAppInstallation(input.values, fetcher);
+  async customCredential(input, { fetcher, signal }) {
+    return validateGitHubAppInstallation(input.values, fetcher, signal);
   },
 };
 
@@ -138,12 +147,16 @@ async function validateGitHubToken(accessToken: string, fetcher: typeof fetch) {
  * Prove the three inputs agree with each other and with GitHub: the key signs
  * for this App (the installation lookup accepts the JWT), the installation
  * belongs to it, and a token can actually be minted. The profile is the
- * installation's account, which is the identity the credential acts as.
+ * installation's account, identifying where the App is installed.
  */
-async function validateGitHubAppInstallation(values: Record<string, string>, fetcher: typeof fetch) {
+async function validateGitHubAppInstallation(
+  values: Record<string, string>,
+  fetcher: typeof fetch,
+  signal?: AbortSignal,
+) {
   const credential = readGitHubAppInstallationCredential(values);
-  const installation = await fetchGitHubAppInstallation(credential, fetcher);
-  const minted = await mintGitHubInstallationToken(credential, fetcher);
+  const installation = await fetchGitHubAppInstallation(credential, fetcher, signal);
+  const minted = await mintGitHubInstallationToken(credential, fetcher, signal);
 
   const account = installation.account ?? {};
   const login = typeof account.login === "string" ? account.login : undefined;

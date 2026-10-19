@@ -1,5 +1,5 @@
 import type { ProviderActionHandlerSubset } from "../provider-runtime.ts";
-import type { GitHubActionHandler, GitHubInstallationContext } from "./runtime-shared.ts";
+import type { GitHubActionHandler } from "./runtime-shared.ts";
 
 import { optionalBoolean, optionalInteger, optionalRawString, optionalString } from "../../core/cast.ts";
 import { ProviderRequestError } from "../provider-runtime.ts";
@@ -17,10 +17,7 @@ import {
 } from "./runtime-shared.ts";
 
 export const repositoryActionHandlers: ProviderActionHandlerSubset<"github", GitHubActionHandler> = {
-  async get_current_user(_input, { accessToken, fetcher, installation }) {
-    if (installation) {
-      return getInstallationAccount(installation);
-    }
+  get_current_user(_input, { accessToken, fetcher }) {
     return githubRequestJson<Record<string, unknown>>({
       path: "/user",
       accessToken,
@@ -358,52 +355,19 @@ async function listMyRepositories(input: Record<string, unknown>, accessToken: s
   return { repositories };
 }
 
-/**
- * The account an installation acts for, in the shape of the user profile the
- * action normally returns.
- *
- * `GET /user` answers 403 for an installation token: an installation is not a
- * user. The installation's `account` (a User or an Organization) is the
- * identity it does have, and it carries the same summary fields — `login`,
- * `id`, `type`, `avatar_url`, `html_url`. The profile-only fields a user object
- * adds are reported as null rather than omitted, so consumers reading the
- * documented shape see a complete object, and the installation itself is
- * attached so a caller can tell which kind of identity it got.
- */
-async function getInstallationAccount(installation: GitHubInstallationContext) {
-  const detail = await installation.describe();
-  const account = detail.account ?? {};
-  return {
-    name: null,
-    email: null,
-    bio: null,
-    company: null,
-    location: null,
-    ...account,
-    installation: {
-      id: detail.id,
-      permissions: detail.permissions ?? {},
-      repository_selection: detail.repository_selection ?? null,
-    },
-  };
-}
-
-/**
- * The repositories an installation token can act on, as the same
- * `{ repositories }` page the user listing returns.
- *
- * `GET /user/repos` answers 403 for an installation token; the installation's
- * own listing is `GET /installation/repositories`. It takes only `per_page` and
- * `page` — `visibility`, `sort` and `direction` are user-listing concepts and
- * are ignored here — and envelopes the rows, so only the `repositories` array
- * the action declares is returned; callers paginate by page number and stop on
- * a short page exactly as they do for the user listing.
- */
 async function listInstallationRepositories(
   input: Record<string, unknown>,
   accessToken: string,
   fetcher: typeof fetch,
 ) {
+  for (const field of ["visibility", "sort", "direction"]) {
+    if (input[field] !== undefined) {
+      throw new ProviderRequestError(
+        400,
+        `${field} is not supported with a GitHub App installation credential. Omit it to list the installation's repositories.`,
+      );
+    }
+  }
   const page = await githubRequestJson<{ repositories?: Record<string, unknown>[] }>({
     path: "/installation/repositories",
     query: compactObject({
